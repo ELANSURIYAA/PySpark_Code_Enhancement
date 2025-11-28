@@ -1,0 +1,20 @@
+target table:
+
+CREATE TABLE workspace.default.branch_summary_report (
+    BRANCH_ID BIGINT,
+    BRANCH_NAME STRING,
+    TOTAL_TRANSACTIONS BIGINT,
+    TOTAL_AMOUNT DOUBLE,
+    REGION STRING,
+    LAST_AUDIT_DATE STRING
+)
+USING delta
+TBLPROPERTIES (
+    'delta.enableDeletionVectors' = 'true',
+    'delta.feature.appendOnly' = 'supported',
+    'delta.feature.deletionVectors' = 'supported',
+    'delta.feature.invariants' = 'supported',
+    'delta.minReaderVersion' = '3',
+    'delta.minWriterVersion' = '7',
+    'delta.parquet.compression.codec' = 'zstd'
+);
