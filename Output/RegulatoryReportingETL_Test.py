@@ -1,295 +1,206 @@
 ====================================================================
 # Author: Ascendion AAVA
-# Date: <Leave it blank>
-# Description: Test script for Enhanced Regulatory Reporting ETL with insert and update scenarios
+# Date: 
+# Description: Test script for Enhanced Regulatory Reporting ETL with Branch Operational Details
 ====================================================================
 
 import logging
 from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.functions import col, count, sum, when, lit
-from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType, DateType
-from datetime import datetime
+from pyspark.sql.functions import col, count, sum, when, lit, coalesce
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DecimalType, DateType, LongType, DoubleType
+from datetime import datetime, date
+from delta.tables import DeltaTable
 import sys
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class ETLTester:
+class RegulatoryReportingETLTest:
     """
-    Test class for validating PySpark ETL functionality with insert and update scenarios.
+    Test class for Regulatory Reporting ETL functionality.
+    Tests both insert and update scenarios without using PyTest framework.
     """
     
     def __init__(self):
-        self.spark = self.get_spark_session()
+        self.spark = None
         self.test_results = []
         
-    def get_spark_session(self) -> SparkSession:
-        """
-        Initialize Spark session for testing.
-        """
+    def setup_spark(self):
+        """Initialize Spark session for testing"""
         try:
-            try:
-                spark = SparkSession.getActiveSession()
-                if spark is None:
-                    raise Exception("No active session found")
-            except:
-                spark = SparkSession.builder \
-                    .appName("ETL_Testing") \
+            self.spark = SparkSession.getActiveSession()
+            if self.spark is None:
+                self.spark = SparkSession.builder \
+                    .appName("RegulatoryReportingETL_Test") \
                     .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
                     .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
                     .getOrCreate()
-            
-            logger.info("Spark session initialized for testing")
-            return spark
+            logger.info("Test Spark session created successfully.")
         except Exception as e:
-            logger.error(f"Error creating Spark session: {e}")
+            logger.error(f"Error creating test Spark session: {e}")
             raise
     
-    def create_base_data(self):
-        """
-        Create base data that will be used across test scenarios.
-        """
-        # Base customer data
-        customer_data = [
-            (1, "Alice Johnson", "alice@email.com", "111-222-3333", "100 First St", "2023-01-01"),
-            (2, "Bob Wilson", "bob@email.com", "444-555-6666", "200 Second Ave", "2023-01-02")
-        ]
-        customer_df = self.spark.createDataFrame(customer_data, 
-            ["CUSTOMER_ID", "NAME", "EMAIL", "PHONE", "ADDRESS", "CREATED_DATE"])
+    def create_test_data_scenario1(self):
+        """Create test data for Scenario 1: Insert new records"""
+        logger.info("Creating test data for Scenario 1: Insert")
         
-        # Base branch data
+        # Branch data
+        branch_schema = StructType([
+            StructField("BRANCH_ID", IntegerType(), True),
+            StructField("BRANCH_NAME", StringType(), True),
+            StructField("BRANCH_CODE", StringType(), True),
+            StructField("CITY", StringType(), True),
+            StructField("STATE", StringType(), True),
+            StructField("COUNTRY", StringType(), True)
+        ])
+        
         branch_data = [
-            (201, "Test Branch A", "TB001", "TestCity", "TS", "USA"),
-            (202, "Test Branch B", "TB002", "TestTown", "TS", "USA")
+            (201, "New Branch A", "NBA001", "Boston", "MA", "USA"),
+            (202, "New Branch B", "NBB002", "Seattle", "WA", "USA")
         ]
-        branch_df = self.spark.createDataFrame(branch_data, 
-            ["BRANCH_ID", "BRANCH_NAME", "BRANCH_CODE", "CITY", "STATE", "COUNTRY"])
         
-        # Base account data
+        # Branch Operational Details
+        branch_operational_schema = StructType([
+            StructField("BRANCH_ID", IntegerType(), True),
+            StructField("REGION", StringType(), True),
+            StructField("MANAGER_NAME", StringType(), True),
+            StructField("LAST_AUDIT_DATE", DateType(), True),
+            StructField("IS_ACTIVE", StringType(), True)
+        ])
+        
+        branch_operational_data = [
+            (201, "Northeast", "David Manager", date(2024, 1, 15), "Y"),
+            (202, "Northwest", "Eve Manager", date(2024, 1, 20), "Y")
+        ]
+        
+        # Account data
+        account_schema = StructType([
+            StructField("ACCOUNT_ID", IntegerType(), True),
+            StructField("CUSTOMER_ID", IntegerType(), True),
+            StructField("BRANCH_ID", IntegerType(), True),
+            StructField("ACCOUNT_NUMBER", StringType(), True),
+            StructField("ACCOUNT_TYPE", StringType(), True),
+            StructField("BALANCE", DecimalType(15, 2), True),
+            StructField("OPENED_DATE", DateType(), True)
+        ])
+        
         account_data = [
-            (2001, 1, 201, "TACC001", "SAVINGS", 1000.00, "2023-01-01"),
-            (2002, 2, 202, "TACC002", "CHECKING", 2000.00, "2023-01-02")
+            (2001, 4, 201, "ACC201", "CHECKING", 3000.00, date(2024, 1, 10)),
+            (2002, 5, 202, "ACC202", "SAVINGS", 8000.00, date(2024, 1, 12))
         ]
-        account_df = self.spark.createDataFrame(account_data, 
-            ["ACCOUNT_ID", "CUSTOMER_ID", "BRANCH_ID", "ACCOUNT_NUMBER", "ACCOUNT_TYPE", "BALANCE", "OPENED_DATE"])
         
-        return customer_df, branch_df, account_df
+        # Transaction data
+        transaction_schema = StructType([
+            StructField("TRANSACTION_ID", IntegerType(), True),
+            StructField("ACCOUNT_ID", IntegerType(), True),
+            StructField("TRANSACTION_TYPE", StringType(), True),
+            StructField("AMOUNT", DecimalType(15, 2), True),
+            StructField("TRANSACTION_DATE", DateType(), True),
+            StructField("DESCRIPTION", StringType(), True)
+        ])
+        
+        transaction_data = [
+            (20001, 2001, "DEPOSIT", 1500.00, date(2024, 1, 15), "Initial deposit"),
+            (20002, 2001, "WITHDRAWAL", 300.00, date(2024, 1, 16), "ATM withdrawal"),
+            (20003, 2002, "DEPOSIT", 2500.00, date(2024, 1, 15), "Transfer in"),
+            (20004, 2002, "DEPOSIT", 1000.00, date(2024, 1, 17), "Check deposit")
+        ]
+        
+        # Create DataFrames
+        branch_df = self.spark.createDataFrame(branch_data, branch_schema)
+        branch_operational_df = self.spark.createDataFrame(branch_operational_data, branch_operational_schema)
+        account_df = self.spark.createDataFrame(account_data, account_schema)
+        transaction_df = self.spark.createDataFrame(transaction_data, transaction_schema)
+        
+        return {
+            "branch": branch_df,
+            "branch_operational": branch_operational_df,
+            "account": account_df,
+            "transaction": transaction_df
+        }
     
-    def test_scenario_1_insert(self):
-        """
-        Test Scenario 1: Insert new records into target table.
-        Tests the ETL with completely new transaction data.
-        """
-        logger.info("=== Starting Test Scenario 1: INSERT ===")
+    def create_test_data_scenario2(self):
+        """Create test data for Scenario 2: Update existing records"""
+        logger.info("Creating test data for Scenario 2: Update")
         
-        try:
-            # Get base data
-            customer_df, branch_df, account_df = self.create_base_data()
-            
-            # Create NEW transaction data (insert scenario)
-            transaction_data = [
-                (30001, 2001, "DEPOSIT", 500.00, "2023-03-01", "Test deposit 1"),
-                (30002, 2002, "WITHDRAWAL", 200.00, "2023-03-02", "Test withdrawal 1"),
-                (30003, 2001, "TRANSFER", 100.00, "2023-03-03", "Test transfer 1")
-            ]
-            transaction_df = self.spark.createDataFrame(transaction_data, 
-                ["TRANSACTION_ID", "ACCOUNT_ID", "TRANSACTION_TYPE", "AMOUNT", "TRANSACTION_DATE", "DESCRIPTION"])
-            
-            # Create branch operational details (NEW source table)
-            branch_operational_data = [
-                (201, "North Test Region", "Test Manager A", "2023-12-01", "Y"),
-                (202, "South Test Region", "Test Manager B", "2023-11-15", "Y")
-            ]
-            branch_operational_df = self.spark.createDataFrame(branch_operational_data, 
-                ["BRANCH_ID", "REGION", "MANAGER_NAME", "LAST_AUDIT_DATE", "IS_ACTIVE"])
-            
-            # Execute ETL logic (create_branch_summary_report)
-            result_df = self.create_branch_summary_report_test(
-                transaction_df, account_df, branch_df, branch_operational_df
-            )
-            
-            # Validate results
-            expected_records = 2  # Two branches with transactions
-            actual_records = result_df.count()
-            
-            # Check if all expected columns exist
-            expected_columns = ["BRANCH_ID", "BRANCH_NAME", "TOTAL_TRANSACTIONS", "TOTAL_AMOUNT", "REGION", "LAST_AUDIT_DATE"]
-            actual_columns = result_df.columns
-            
-            # Validate data content
-            branch_201_data = result_df.filter(col("BRANCH_ID") == 201).collect()
-            branch_202_data = result_df.filter(col("BRANCH_ID") == 202).collect()
-            
-            # Test assertions
-            test_passed = True
-            test_details = {
-                "scenario": "Insert New Records",
-                "input_transactions": transaction_data,
-                "expected_records": expected_records,
-                "actual_records": actual_records,
-                "expected_columns": expected_columns,
-                "actual_columns": actual_columns,
-                "output_data": result_df.collect(),
-                "validations": []
-            }
-            
-            # Validation 1: Record count
-            if actual_records == expected_records:
-                test_details["validations"].append("✓ Record count matches expected")
-            else:
-                test_details["validations"].append(f"✗ Record count mismatch: expected {expected_records}, got {actual_records}")
-                test_passed = False
-            
-            # Validation 2: Column structure
-            if set(expected_columns) == set(actual_columns):
-                test_details["validations"].append("✓ All expected columns present")
-            else:
-                test_details["validations"].append(f"✗ Column mismatch: missing {set(expected_columns) - set(actual_columns)}")
-                test_passed = False
-            
-            # Validation 3: Data content for Branch 201
-            if branch_201_data and branch_201_data[0]["TOTAL_TRANSACTIONS"] == 2:  # 2 transactions for branch 201
-                test_details["validations"].append("✓ Branch 201 transaction count correct")
-            else:
-                test_details["validations"].append("✗ Branch 201 transaction count incorrect")
-                test_passed = False
-            
-            # Validation 4: Region data populated correctly
-            if branch_201_data and branch_201_data[0]["REGION"] == "North Test Region":
-                test_details["validations"].append("✓ Region data populated correctly")
-            else:
-                test_details["validations"].append("✗ Region data not populated correctly")
-                test_passed = False
-            
-            test_details["status"] = "PASS" if test_passed else "FAIL"
-            self.test_results.append(test_details)
-            
-            logger.info(f"Test Scenario 1 completed: {test_details['status']}")
-            return test_details
-            
-        except Exception as e:
-            logger.error(f"Test Scenario 1 failed with exception: {e}")
-            error_details = {
-                "scenario": "Insert New Records",
-                "status": "FAIL",
-                "error": str(e),
-                "validations": [f"✗ Exception occurred: {e}"]
-            }
-            self.test_results.append(error_details)
-            return error_details
+        # Use existing branch IDs but with updated operational details
+        branch_schema = StructType([
+            StructField("BRANCH_ID", IntegerType(), True),
+            StructField("BRANCH_NAME", StringType(), True),
+            StructField("BRANCH_CODE", StringType(), True),
+            StructField("CITY", StringType(), True),
+            StructField("STATE", StringType(), True),
+            StructField("COUNTRY", StringType(), True)
+        ])
+        
+        branch_data = [
+            (101, "Downtown Branch", "DT001", "New York", "NY", "USA"),  # Existing branch
+            (102, "Uptown Branch", "UT002", "Los Angeles", "CA", "USA")   # Existing branch
+        ]
+        
+        # Updated Branch Operational Details
+        branch_operational_schema = StructType([
+            StructField("BRANCH_ID", IntegerType(), True),
+            StructField("REGION", StringType(), True),
+            StructField("MANAGER_NAME", StringType(), True),
+            StructField("LAST_AUDIT_DATE", DateType(), True),
+            StructField("IS_ACTIVE", StringType(), True)
+        ])
+        
+        branch_operational_data = [
+            (101, "East Coast Updated", "Alice Manager Updated", date(2024, 2, 1), "Y"),  # Updated region and audit date
+            (102, "West Coast Updated", "Bob Manager Updated", date(2024, 2, 15), "Y")   # Updated region and audit date
+        ]
+        
+        # Account data for existing branches
+        account_schema = StructType([
+            StructField("ACCOUNT_ID", IntegerType(), True),
+            StructField("CUSTOMER_ID", IntegerType(), True),
+            StructField("BRANCH_ID", IntegerType(), True),
+            StructField("ACCOUNT_NUMBER", StringType(), True),
+            StructField("ACCOUNT_TYPE", StringType(), True),
+            StructField("BALANCE", DecimalType(15, 2), True),
+            StructField("OPENED_DATE", DateType(), True)
+        ])
+        
+        account_data = [
+            (1001, 1, 101, "ACC001", "CHECKING", 5000.00, date(2023, 1, 20)),  # Existing account
+            (1002, 2, 102, "ACC002", "SAVINGS", 15000.00, date(2023, 2, 25))   # Existing account
+        ]
+        
+        # New transactions for existing accounts
+        transaction_schema = StructType([
+            StructField("TRANSACTION_ID", IntegerType(), True),
+            StructField("ACCOUNT_ID", IntegerType(), True),
+            StructField("TRANSACTION_TYPE", StringType(), True),
+            StructField("AMOUNT", DecimalType(15, 2), True),
+            StructField("TRANSACTION_DATE", DateType(), True),
+            StructField("DESCRIPTION", StringType(), True)
+        ])
+        
+        transaction_data = [
+            (30001, 1001, "DEPOSIT", 2000.00, date(2024, 2, 1), "Updated salary deposit"),
+            (30002, 1001, "WITHDRAWAL", 500.00, date(2024, 2, 2), "Updated ATM withdrawal"),
+            (30003, 1002, "DEPOSIT", 3000.00, date(2024, 2, 1), "Updated transfer in"),
+            (30004, 1002, "WITHDRAWAL", 800.00, date(2024, 2, 3), "Updated check payment")
+        ]
+        
+        # Create DataFrames
+        branch_df = self.spark.createDataFrame(branch_data, branch_schema)
+        branch_operational_df = self.spark.createDataFrame(branch_operational_data, branch_operational_schema)
+        account_df = self.spark.createDataFrame(account_data, account_schema)
+        transaction_df = self.spark.createDataFrame(transaction_data, transaction_schema)
+        
+        return {
+            "branch": branch_df,
+            "branch_operational": branch_operational_df,
+            "account": account_df,
+            "transaction": transaction_df
+        }
     
-    def test_scenario_2_update(self):
-        """
-        Test Scenario 2: Update existing records in target table.
-        Tests the ETL with modified transaction data for existing branches.
-        """
-        logger.info("=== Starting Test Scenario 2: UPDATE ===")
-        
-        try:
-            # Get base data
-            customer_df, branch_df, account_df = self.create_base_data()
-            
-            # Create UPDATED transaction data (update scenario)
-            # Simulating additional transactions for existing branches
-            transaction_data = [
-                (40001, 2001, "DEPOSIT", 1500.00, "2023-04-01", "Updated deposit 1"),
-                (40002, 2002, "WITHDRAWAL", 800.00, "2023-04-02", "Updated withdrawal 1"),
-                (40003, 2001, "TRANSFER", 300.00, "2023-04-03", "Updated transfer 1"),
-                (40004, 2002, "DEPOSIT", 600.00, "2023-04-04", "Updated deposit 2")
-            ]
-            transaction_df = self.spark.createDataFrame(transaction_data, 
-                ["TRANSACTION_ID", "ACCOUNT_ID", "TRANSACTION_TYPE", "AMOUNT", "TRANSACTION_DATE", "DESCRIPTION"])
-            
-            # Create updated branch operational details with some changes
-            branch_operational_data = [
-                (201, "Updated North Region", "New Manager A", "2023-12-15", "Y"),  # Updated region name
-                (202, "Updated South Region", "New Manager B", "2023-12-10", "N")   # Changed to inactive
-            ]
-            branch_operational_df = self.spark.createDataFrame(branch_operational_data, 
-                ["BRANCH_ID", "REGION", "MANAGER_NAME", "LAST_AUDIT_DATE", "IS_ACTIVE"])
-            
-            # Execute ETL logic
-            result_df = self.create_branch_summary_report_test(
-                transaction_df, account_df, branch_df, branch_operational_df
-            )
-            
-            # Validate results
-            expected_records = 2  # Two branches
-            actual_records = result_df.count()
-            
-            # Get specific branch data for validation
-            branch_201_data = result_df.filter(col("BRANCH_ID") == 201).collect()
-            branch_202_data = result_df.filter(col("BRANCH_ID") == 202).collect()
-            
-            # Test assertions
-            test_passed = True
-            test_details = {
-                "scenario": "Update Existing Records",
-                "input_transactions": transaction_data,
-                "expected_records": expected_records,
-                "actual_records": actual_records,
-                "output_data": result_df.collect(),
-                "validations": []
-            }
-            
-            # Validation 1: Record count
-            if actual_records == expected_records:
-                test_details["validations"].append("✓ Record count matches expected")
-            else:
-                test_details["validations"].append(f"✗ Record count mismatch: expected {expected_records}, got {actual_records}")
-                test_passed = False
-            
-            # Validation 2: Updated transaction amounts
-            if branch_201_data:
-                expected_amount_201 = 1500.00 + 300.00  # Two transactions for branch 201
-                actual_amount_201 = branch_201_data[0]["TOTAL_AMOUNT"]
-                if abs(actual_amount_201 - expected_amount_201) < 0.01:
-                    test_details["validations"].append("✓ Branch 201 total amount updated correctly")
-                else:
-                    test_details["validations"].append(f"✗ Branch 201 amount incorrect: expected {expected_amount_201}, got {actual_amount_201}")
-                    test_passed = False
-            
-            # Validation 3: Updated region name
-            if branch_201_data and branch_201_data[0]["REGION"] == "Updated North Region":
-                test_details["validations"].append("✓ Branch 201 region updated correctly")
-            else:
-                test_details["validations"].append("✗ Branch 201 region not updated correctly")
-                test_passed = False
-            
-            # Validation 4: Inactive branch handling (IS_ACTIVE = 'N')
-            if branch_202_data and branch_202_data[0]["REGION"] is None:
-                test_details["validations"].append("✓ Inactive branch region correctly set to null")
-            else:
-                test_details["validations"].append("✗ Inactive branch region not handled correctly")
-                test_passed = False
-            
-            test_details["status"] = "PASS" if test_passed else "FAIL"
-            self.test_results.append(test_details)
-            
-            logger.info(f"Test Scenario 2 completed: {test_details['status']}")
-            return test_details
-            
-        except Exception as e:
-            logger.error(f"Test Scenario 2 failed with exception: {e}")
-            error_details = {
-                "scenario": "Update Existing Records",
-                "status": "FAIL",
-                "error": str(e),
-                "validations": [f"✗ Exception occurred: {e}"]
-            }
-            self.test_results.append(error_details)
-            return error_details
-    
-    def create_branch_summary_report_test(self, transaction_df: DataFrame, account_df: DataFrame, 
-                                         branch_df: DataFrame, branch_operational_df: DataFrame) -> DataFrame:
-        """
-        Test version of the create_branch_summary_report function.
-        This replicates the enhanced logic from the main ETL script.
-        """
-        logger.info("Creating Enhanced Branch Summary Report for testing")
-        
-        # Base aggregation
+    def create_branch_summary_report(self, transaction_df: DataFrame, account_df: DataFrame, branch_df: DataFrame, branch_operational_df: DataFrame) -> DataFrame:
+        """Create branch summary report - same logic as main ETL"""
         base_summary = transaction_df.join(account_df, "ACCOUNT_ID") \
                                      .join(branch_df, "BRANCH_ID") \
                                      .groupBy("BRANCH_ID", "BRANCH_NAME") \
@@ -298,136 +209,276 @@ class ETLTester:
                                          sum("AMOUNT").alias("TOTAL_AMOUNT")
                                      )
         
-        # Integration with BRANCH_OPERATIONAL_DETAILS
-        enhanced_summary = base_summary.join(branch_operational_df, "BRANCH_ID", "left")
+        enhanced_summary = base_summary.join(branch_operational_df, "BRANCH_ID", "left") \
+                                      .select(
+                                          col("BRANCH_ID").cast(LongType()),
+                                          col("BRANCH_NAME"),
+                                          col("TOTAL_TRANSACTIONS"),
+                                          col("TOTAL_AMOUNT").cast(DoubleType()),
+                                          coalesce(col("REGION"), lit("Unknown")).alias("REGION"),
+                                          col("LAST_AUDIT_DATE").cast(StringType()).alias("LAST_AUDIT_DATE")
+                                      )
         
-        # Conditional population based on IS_ACTIVE = 'Y'
-        final_summary = enhanced_summary.withColumn(
-            "REGION", 
-            when(col("IS_ACTIVE") == "Y", col("REGION")).otherwise(lit(None))
-        ).withColumn(
-            "LAST_AUDIT_DATE", 
-            when(col("IS_ACTIVE") == "Y", col("LAST_AUDIT_DATE")).otherwise(lit(None))
-        ).select(
-            col("BRANCH_ID"),
-            col("BRANCH_NAME"),
-            col("TOTAL_TRANSACTIONS"),
-            col("TOTAL_AMOUNT"),
-            col("REGION"),
-            col("LAST_AUDIT_DATE")
-        )
-        
-        return final_summary
+        return enhanced_summary
     
-    def generate_test_report(self):
-        """
-        Generate a comprehensive test report in markdown format.
-        """
-        report = []
-        report.append("# Test Report - Enhanced Regulatory Reporting ETL")
-        report.append("")
-        report.append(f"**Test Execution Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        report.append(f"**Total Test Scenarios:** {len(self.test_results)}")
-        report.append("")
+    def test_scenario_1_insert(self):
+        """Test Scenario 1: Insert new records"""
+        logger.info("Running Test Scenario 1: Insert")
         
-        for i, test in enumerate(self.test_results, 1):
-            report.append(f"## Scenario {i}: {test['scenario']}")
-            report.append("")
+        try:
+            # Create test data
+            test_data = self.create_test_data_scenario1()
             
-            # Input section
-            if 'input_transactions' in test:
-                report.append("### Input Data:")
-                report.append("| Transaction ID | Account ID | Type | Amount | Date | Description |")
-                report.append("|----------------|------------|------|--------|------|-------------|")
-                for txn in test['input_transactions']:
-                    report.append(f"| {txn[0]} | {txn[1]} | {txn[2]} | ${txn[3]:.2f} | {txn[4]} | {txn[5]} |")
-                report.append("")
+            # Process data
+            result_df = self.create_branch_summary_report(
+                test_data["transaction"],
+                test_data["account"],
+                test_data["branch"],
+                test_data["branch_operational"]
+            )
             
-            # Output section
-            if 'output_data' in test and test['output_data']:
-                report.append("### Output Data:")
-                report.append("| Branch ID | Branch Name | Total Transactions | Total Amount | Region | Last Audit Date |")
-                report.append("|-----------|-------------|-------------------|--------------|--------|-----------------|")
-                for row in test['output_data']:
-                    region = row['REGION'] if row['REGION'] else 'NULL'
-                    audit_date = row['LAST_AUDIT_DATE'] if row['LAST_AUDIT_DATE'] else 'NULL'
-                    report.append(f"| {row['BRANCH_ID']} | {row['BRANCH_NAME']} | {row['TOTAL_TRANSACTIONS']} | ${row['TOTAL_AMOUNT']:.2f} | {region} | {audit_date} |")
-                report.append("")
+            # Collect results for validation
+            results = result_df.collect()
             
-            # Validations section
-            report.append("### Validations:")
-            for validation in test['validations']:
-                report.append(f"- {validation}")
-            report.append("")
+            # Validation
+            expected_branches = {201, 202}
+            actual_branches = {row["BRANCH_ID"] for row in results}
             
-            # Status
-            status_emoji = "✅" if test['status'] == 'PASS' else "❌"
-            report.append(f"### Status: {status_emoji} {test['status']}")
-            
-            if 'error' in test:
-                report.append(f"**Error:** {test['error']}")
-            
-            report.append("")
-            report.append("---")
-            report.append("")
+            # Check if all expected branches are present
+            if expected_branches == actual_branches:
+                # Check specific values
+                branch_201 = next((row for row in results if row["BRANCH_ID"] == 201), None)
+                branch_202 = next((row for row in results if row["BRANCH_ID"] == 202), None)
+                
+                validation_passed = (
+                    branch_201 is not None and
+                    branch_202 is not None and
+                    branch_201["TOTAL_TRANSACTIONS"] == 2 and
+                    branch_201["TOTAL_AMOUNT"] == 1800.0 and  # 1500 + 300
+                    branch_201["REGION"] == "Northeast" and
+                    branch_202["TOTAL_TRANSACTIONS"] == 2 and
+                    branch_202["TOTAL_AMOUNT"] == 3500.0 and  # 2500 + 1000
+                    branch_202["REGION"] == "Northwest"
+                )
+                
+                if validation_passed:
+                    self.test_results.append({
+                        "scenario": "Scenario 1: Insert",
+                        "status": "PASS",
+                        "input_data": test_data,
+                        "output_data": results,
+                        "message": "All new records inserted successfully with correct calculations"
+                    })
+                    logger.info("Test Scenario 1: PASSED")
+                else:
+                    self.test_results.append({
+                        "scenario": "Scenario 1: Insert",
+                        "status": "FAIL",
+                        "input_data": test_data,
+                        "output_data": results,
+                        "message": "Data validation failed - incorrect calculations or missing data"
+                    })
+                    logger.error("Test Scenario 1: FAILED - Data validation failed")
+            else:
+                self.test_results.append({
+                    "scenario": "Scenario 1: Insert",
+                    "status": "FAIL",
+                    "input_data": test_data,
+                    "output_data": results,
+                    "message": f"Expected branches {expected_branches}, got {actual_branches}"
+                })
+                logger.error("Test Scenario 1: FAILED - Missing branches")
+                
+        except Exception as e:
+            self.test_results.append({
+                "scenario": "Scenario 1: Insert",
+                "status": "FAIL",
+                "input_data": None,
+                "output_data": None,
+                "message": f"Exception occurred: {str(e)}"
+            })
+            logger.error(f"Test Scenario 1: FAILED with exception: {e}")
+    
+    def test_scenario_2_update(self):
+        """Test Scenario 2: Update existing records"""
+        logger.info("Running Test Scenario 2: Update")
         
-        # Summary
-        passed_tests = sum(1 for test in self.test_results if test['status'] == 'PASS')
-        failed_tests = len(self.test_results) - passed_tests
+        try:
+            # Create test data
+            test_data = self.create_test_data_scenario2()
+            
+            # Process data
+            result_df = self.create_branch_summary_report(
+                test_data["transaction"],
+                test_data["account"],
+                test_data["branch"],
+                test_data["branch_operational"]
+            )
+            
+            # Collect results for validation
+            results = result_df.collect()
+            
+            # Validation
+            expected_branches = {101, 102}
+            actual_branches = {row["BRANCH_ID"] for row in results}
+            
+            # Check if all expected branches are present
+            if expected_branches == actual_branches:
+                # Check specific values for updated data
+                branch_101 = next((row for row in results if row["BRANCH_ID"] == 101), None)
+                branch_102 = next((row for row in results if row["BRANCH_ID"] == 102), None)
+                
+                validation_passed = (
+                    branch_101 is not None and
+                    branch_102 is not None and
+                    branch_101["TOTAL_TRANSACTIONS"] == 2 and
+                    branch_101["TOTAL_AMOUNT"] == 2500.0 and  # 2000 + 500
+                    branch_101["REGION"] == "East Coast Updated" and
+                    branch_101["LAST_AUDIT_DATE"] == "2024-02-01" and
+                    branch_102["TOTAL_TRANSACTIONS"] == 2 and
+                    branch_102["TOTAL_AMOUNT"] == 3800.0 and  # 3000 + 800
+                    branch_102["REGION"] == "West Coast Updated" and
+                    branch_102["LAST_AUDIT_DATE"] == "2024-02-15"
+                )
+                
+                if validation_passed:
+                    self.test_results.append({
+                        "scenario": "Scenario 2: Update",
+                        "status": "PASS",
+                        "input_data": test_data,
+                        "output_data": results,
+                        "message": "All existing records updated successfully with new operational details"
+                    })
+                    logger.info("Test Scenario 2: PASSED")
+                else:
+                    self.test_results.append({
+                        "scenario": "Scenario 2: Update",
+                        "status": "FAIL",
+                        "input_data": test_data,
+                        "output_data": results,
+                        "message": "Data validation failed - incorrect updates or missing operational details"
+                    })
+                    logger.error("Test Scenario 2: FAILED - Data validation failed")
+            else:
+                self.test_results.append({
+                    "scenario": "Scenario 2: Update",
+                    "status": "FAIL",
+                    "input_data": test_data,
+                    "output_data": results,
+                    "message": f"Expected branches {expected_branches}, got {actual_branches}"
+                })
+                logger.error("Test Scenario 2: FAILED - Missing branches")
+                
+        except Exception as e:
+            self.test_results.append({
+                "scenario": "Scenario 2: Update",
+                "status": "FAIL",
+                "input_data": None,
+                "output_data": None,
+                "message": f"Exception occurred: {str(e)}"
+            })
+            logger.error(f"Test Scenario 2: FAILED with exception: {e}")
+    
+    def generate_markdown_report(self):
+        """Generate markdown test report"""
+        report = "# Test Report\n\n"
+        report += "## Enhanced Regulatory Reporting ETL Test Results\n\n"
         
-        report.append("## Test Summary")
-        report.append("")
-        report.append(f"- **Total Tests:** {len(self.test_results)}")
-        report.append(f"- **Passed:** {passed_tests} ✅")
-        report.append(f"- **Failed:** {failed_tests} ❌")
-        report.append(f"- **Success Rate:** {(passed_tests/len(self.test_results)*100):.1f}%")
+        for result in self.test_results:
+            report += f"### {result['scenario']}\n\n"
+            
+            if result['input_data'] and result['scenario'] == "Scenario 1: Insert":
+                report += "**Input Data:**\n"
+                report += "Branch Data:\n"
+                report += "| BRANCH_ID | BRANCH_NAME | REGION | MANAGER_NAME |\n"
+                report += "|-----------|-------------|---------|--------------|\n"
+                report += "| 201 | New Branch A | Northeast | David Manager |\n"
+                report += "| 202 | New Branch B | Northwest | Eve Manager |\n\n"
+                
+                report += "Transaction Data:\n"
+                report += "| TRANSACTION_ID | ACCOUNT_ID | AMOUNT | TYPE |\n"
+                report += "|----------------|------------|--------|------|\n"
+                report += "| 20001 | 2001 | 1500.00 | DEPOSIT |\n"
+                report += "| 20002 | 2001 | 300.00 | WITHDRAWAL |\n"
+                report += "| 20003 | 2002 | 2500.00 | DEPOSIT |\n"
+                report += "| 20004 | 2002 | 1000.00 | DEPOSIT |\n\n"
+            
+            elif result['input_data'] and result['scenario'] == "Scenario 2: Update":
+                report += "**Input Data:**\n"
+                report += "Updated Branch Operational Data:\n"
+                report += "| BRANCH_ID | REGION | LAST_AUDIT_DATE | MANAGER_NAME |\n"
+                report += "|-----------|--------|-----------------|--------------|\n"
+                report += "| 101 | East Coast Updated | 2024-02-01 | Alice Manager Updated |\n"
+                report += "| 102 | West Coast Updated | 2024-02-15 | Bob Manager Updated |\n\n"
+                
+                report += "New Transaction Data:\n"
+                report += "| TRANSACTION_ID | ACCOUNT_ID | AMOUNT | TYPE |\n"
+                report += "|----------------|------------|--------|------|\n"
+                report += "| 30001 | 1001 | 2000.00 | DEPOSIT |\n"
+                report += "| 30002 | 1001 | 500.00 | WITHDRAWAL |\n"
+                report += "| 30003 | 1002 | 3000.00 | DEPOSIT |\n"
+                report += "| 30004 | 1002 | 800.00 | WITHDRAWAL |\n\n"
+            
+            if result['output_data']:
+                report += "**Output:**\n"
+                report += "| BRANCH_ID | BRANCH_NAME | TOTAL_TRANSACTIONS | TOTAL_AMOUNT | REGION | LAST_AUDIT_DATE |\n"
+                report += "|-----------|-------------|-------------------|--------------|--------|-----------------|\n"
+                for row in result['output_data']:
+                    report += f"| {row['BRANCH_ID']} | {row['BRANCH_NAME']} | {row['TOTAL_TRANSACTIONS']} | {row['TOTAL_AMOUNT']} | {row['REGION']} | {row['LAST_AUDIT_DATE']} |\n"
+                report += "\n"
+            
+            report += f"**Status:** {result['status']}\n\n"
+            report += f"**Message:** {result['message']}\n\n"
+            report += "---\n\n"
         
-        return "\n".join(report)
+        return report
     
     def run_all_tests(self):
-        """
-        Execute all test scenarios and generate report.
-        """
-        logger.info("Starting comprehensive ETL testing...")
+        """Run all test scenarios"""
+        logger.info("Starting Enhanced Regulatory Reporting ETL Tests")
+        
+        self.setup_spark()
         
         # Run test scenarios
         self.test_scenario_1_insert()
         self.test_scenario_2_update()
         
         # Generate and print report
-        report = self.generate_test_report()
+        report = self.generate_markdown_report()
         print("\n" + "="*80)
-        print("TEST EXECUTION RESULTS")
+        print("TEST EXECUTION COMPLETED")
         print("="*80)
         print(report)
         
-        # Cleanup
-        try:
-            self.spark.stop()
-        except:
-            pass
+        # Summary
+        passed_tests = sum(1 for result in self.test_results if result['status'] == 'PASS')
+        total_tests = len(self.test_results)
         
-        return report
+        print(f"\n## Test Summary\n")
+        print(f"**Total Tests:** {total_tests}")
+        print(f"**Passed:** {passed_tests}")
+        print(f"**Failed:** {total_tests - passed_tests}")
+        print(f"**Success Rate:** {(passed_tests/total_tests)*100:.1f}%")
+        
+        return self.test_results
 
 def main():
-    """
-    Main function to execute all tests.
-    """
+    """Main test execution function"""
     try:
-        tester = ETLTester()
-        report = tester.run_all_tests()
+        test_runner = RegulatoryReportingETLTest()
+        results = test_runner.run_all_tests()
         
-        # Return success if all tests passed
-        passed_tests = sum(1 for test in tester.test_results if test['status'] == 'PASS')
-        if passed_tests == len(tester.test_results):
-            logger.info("All tests passed successfully!")
-            return 0
-        else:
-            logger.warning(f"Some tests failed. Passed: {passed_tests}/{len(tester.test_results)}")
+        # Return appropriate exit code
+        failed_tests = sum(1 for result in results if result['status'] == 'FAIL')
+        if failed_tests > 0:
+            logger.error(f"Tests completed with {failed_tests} failures")
             return 1
+        else:
+            logger.info("All tests passed successfully")
+            return 0
             
     except Exception as e:
-        logger.error(f"Test execution failed: {e}")
+        logger.error(f"Test execution failed with exception: {e}")
         return 1
 
 if __name__ == "__main__":
