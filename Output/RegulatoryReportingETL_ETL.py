@@ -1,14 +1,15 @@
 ====================================================================
 # Author: Ascendion AAVA
-# Date: <Leave it blank>
-# Description: Enhanced Regulatory Reporting ETL with BRANCH_OPERATIONAL_DETAILS integration
+# Date: 
+# Description: Enhanced Regulatory Reporting ETL with Branch Operational Details integration
 ====================================================================
 
 import logging
 from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.functions import col, count, sum, when, lit
+from pyspark.sql.functions import col, count, sum, when, lit, coalesce
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DecimalType, DateType, LongType, DoubleType
+from datetime import datetime, date
 from delta.tables import DeltaTable
-from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -20,28 +21,30 @@ def get_spark_session(app_name: str = "RegulatoryReportingETL") -> SparkSession:
     # [MODIFIED] - Updated to use getActiveSession() for Spark Connect compatibility
     """
     try:
-        # [MODIFIED] - Use getActiveSession() instead of creating new session for Spark Connect
+        # [MODIFIED] - Use getActiveSession() instead of creating new session for Spark Connect compatibility
         try:
             spark = SparkSession.getActiveSession()
             if spark is None:
-                raise Exception("No active session found")
+                spark = SparkSession.builder \
+                    .appName(app_name) \
+                    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+                    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+                    .getOrCreate()
         except:
-            # Fallback to creating new session if getActiveSession() fails
             spark = SparkSession.builder \
                 .appName(app_name) \
                 .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
                 .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
                 .getOrCreate()
         
-        # [MODIFIED] - Removed sparkContext.setLogLevel() for Spark Connect compatibility
-        # spark.sparkContext.setLogLevel("WARN")  # Commented out for Spark Connect
+        # [MODIFIED] - Removed sparkContext.setLogLevel call for Spark Connect compatibility
         logger.info("Spark session created successfully.")
         return spark
     except Exception as e:
         logger.error(f"Error creating Spark session: {e}")
         raise
 
-# [DEPRECATED] - JDBC reading function replaced with Delta table reading
+# [DEPRECATED] - Original JDBC-based read_table function commented out for reference
 # def read_table(spark: SparkSession, jdbc_url: str, table_name: str, connection_properties: dict) -> DataFrame:
 #     """
 #     Reads a table from a JDBC source into a DataFrame.
@@ -54,113 +57,139 @@ def get_spark_session(app_name: str = "RegulatoryReportingETL") -> SparkSession:
 #         logger.error(f"Failed to read table {table_name}: {e}")
 #         raise
 
-def create_sample_data(spark: SparkSession):
+# [ADDED] - New function to create sample data for self-contained execution
+def create_sample_data(spark: SparkSession) -> dict:
     """
-    # [ADDED] - Creates sample data for testing purposes
-    Creates sample DataFrames for all source tables to simulate real data.
+    Creates sample DataFrames for testing purposes.
+    # [ADDED] - Self-contained data creation for testing without external dependencies
     """
     logger.info("Creating sample data for testing")
     
-    # Sample Customer data
-    customer_data = [
-        (1, "John Doe", "john@email.com", "123-456-7890", "123 Main St", "2023-01-01"),
-        (2, "Jane Smith", "jane@email.com", "098-765-4321", "456 Oak Ave", "2023-01-02"),
-        (3, "Bob Johnson", "bob@email.com", "555-123-4567", "789 Pine Rd", "2023-01-03")
-    ]
-    customer_df = spark.createDataFrame(customer_data, 
-        ["CUSTOMER_ID", "NAME", "EMAIL", "PHONE", "ADDRESS", "CREATED_DATE"])
+    # Customer sample data
+    customer_schema = StructType([
+        StructField("CUSTOMER_ID", IntegerType(), True),
+        StructField("NAME", StringType(), True),
+        StructField("EMAIL", StringType(), True),
+        StructField("PHONE", StringType(), True),
+        StructField("ADDRESS", StringType(), True),
+        StructField("CREATED_DATE", DateType(), True)
+    ])
     
-    # Sample Branch data
+    customer_data = [
+        (1, "John Doe", "john.doe@email.com", "123-456-7890", "123 Main St", date(2023, 1, 15)),
+        (2, "Jane Smith", "jane.smith@email.com", "234-567-8901", "456 Oak Ave", date(2023, 2, 20)),
+        (3, "Bob Johnson", "bob.johnson@email.com", "345-678-9012", "789 Pine Rd", date(2023, 3, 10))
+    ]
+    
+    # Branch sample data
+    branch_schema = StructType([
+        StructField("BRANCH_ID", IntegerType(), True),
+        StructField("BRANCH_NAME", StringType(), True),
+        StructField("BRANCH_CODE", StringType(), True),
+        StructField("CITY", StringType(), True),
+        StructField("STATE", StringType(), True),
+        StructField("COUNTRY", StringType(), True)
+    ])
+    
     branch_data = [
         (101, "Downtown Branch", "DT001", "New York", "NY", "USA"),
         (102, "Uptown Branch", "UT002", "Los Angeles", "CA", "USA"),
-        (103, "Midtown Branch", "MT003", "Chicago", "IL", "USA")
+        (103, "Central Branch", "CT003", "Chicago", "IL", "USA")
     ]
-    branch_df = spark.createDataFrame(branch_data, 
-        ["BRANCH_ID", "BRANCH_NAME", "BRANCH_CODE", "CITY", "STATE", "COUNTRY"])
     
-    # Sample Account data
-    account_data = [
-        (1001, 1, 101, "ACC001", "SAVINGS", 5000.00, "2023-01-01"),
-        (1002, 2, 102, "ACC002", "CHECKING", 3000.00, "2023-01-02"),
-        (1003, 3, 103, "ACC003", "SAVINGS", 7500.00, "2023-01-03"),
-        (1004, 1, 102, "ACC004", "CHECKING", 2500.00, "2023-01-04")
-    ]
-    account_df = spark.createDataFrame(account_data, 
-        ["ACCOUNT_ID", "CUSTOMER_ID", "BRANCH_ID", "ACCOUNT_NUMBER", "ACCOUNT_TYPE", "BALANCE", "OPENED_DATE"])
+    # [ADDED] - New Branch Operational Details sample data
+    branch_operational_schema = StructType([
+        StructField("BRANCH_ID", IntegerType(), True),
+        StructField("REGION", StringType(), True),
+        StructField("MANAGER_NAME", StringType(), True),
+        StructField("LAST_AUDIT_DATE", DateType(), True),
+        StructField("IS_ACTIVE", StringType(), True)
+    ])
     
-    # Sample Transaction data
-    transaction_data = [
-        (10001, 1001, "DEPOSIT", 1000.00, "2023-02-01", "Salary deposit"),
-        (10002, 1002, "WITHDRAWAL", 500.00, "2023-02-02", "ATM withdrawal"),
-        (10003, 1003, "DEPOSIT", 2000.00, "2023-02-03", "Check deposit"),
-        (10004, 1001, "TRANSFER", 300.00, "2023-02-04", "Online transfer"),
-        (10005, 1004, "DEPOSIT", 750.00, "2023-02-05", "Cash deposit")
-    ]
-    transaction_df = spark.createDataFrame(transaction_data, 
-        ["TRANSACTION_ID", "ACCOUNT_ID", "TRANSACTION_TYPE", "AMOUNT", "TRANSACTION_DATE", "DESCRIPTION"])
-    
-    # [ADDED] - Sample Branch Operational Details data (new source table)
     branch_operational_data = [
-        (101, "North Region", "Alice Manager", "2023-12-01", "Y"),
-        (102, "West Region", "Bob Manager", "2023-11-15", "Y"),
-        (103, "Central Region", "Carol Manager", "2023-10-30", "N"),  # Inactive branch
-        (104, "South Region", "Dave Manager", "2023-12-10", "Y")  # Branch without transactions
+        (101, "East Coast", "Alice Manager", date(2023, 12, 1), "Y"),
+        (102, "West Coast", "Bob Manager", date(2023, 11, 15), "Y"),
+        (103, "Central Region", "Carol Manager", date(2023, 10, 20), "Y")
     ]
-    branch_operational_df = spark.createDataFrame(branch_operational_data, 
-        ["BRANCH_ID", "REGION", "MANAGER_NAME", "LAST_AUDIT_DATE", "IS_ACTIVE"])
     
-    return customer_df, account_df, transaction_df, branch_df, branch_operational_df
+    # Account sample data
+    account_schema = StructType([
+        StructField("ACCOUNT_ID", IntegerType(), True),
+        StructField("CUSTOMER_ID", IntegerType(), True),
+        StructField("BRANCH_ID", IntegerType(), True),
+        StructField("ACCOUNT_NUMBER", StringType(), True),
+        StructField("ACCOUNT_TYPE", StringType(), True),
+        StructField("BALANCE", DecimalType(15, 2), True),
+        StructField("OPENED_DATE", DateType(), True)
+    ])
+    
+    account_data = [
+        (1001, 1, 101, "ACC001", "CHECKING", 5000.00, date(2023, 1, 20)),
+        (1002, 2, 102, "ACC002", "SAVINGS", 15000.00, date(2023, 2, 25)),
+        (1003, 3, 103, "ACC003", "CHECKING", 7500.00, date(2023, 3, 15)),
+        (1004, 1, 101, "ACC004", "SAVINGS", 25000.00, date(2023, 1, 25))
+    ]
+    
+    # Transaction sample data
+    transaction_schema = StructType([
+        StructField("TRANSACTION_ID", IntegerType(), True),
+        StructField("ACCOUNT_ID", IntegerType(), True),
+        StructField("TRANSACTION_TYPE", StringType(), True),
+        StructField("AMOUNT", DecimalType(15, 2), True),
+        StructField("TRANSACTION_DATE", DateType(), True),
+        StructField("DESCRIPTION", StringType(), True)
+    ])
+    
+    transaction_data = [
+        (10001, 1001, "DEPOSIT", 1000.00, date(2023, 4, 1), "Salary deposit"),
+        (10002, 1001, "WITHDRAWAL", 200.00, date(2023, 4, 2), "ATM withdrawal"),
+        (10003, 1002, "DEPOSIT", 2000.00, date(2023, 4, 1), "Transfer in"),
+        (10004, 1003, "WITHDRAWAL", 500.00, date(2023, 4, 3), "Check payment"),
+        (10005, 1004, "DEPOSIT", 5000.00, date(2023, 4, 1), "Investment return")
+    ]
+    
+    # Create DataFrames
+    customer_df = spark.createDataFrame(customer_data, customer_schema)
+    branch_df = spark.createDataFrame(branch_data, branch_schema)
+    branch_operational_df = spark.createDataFrame(branch_operational_data, branch_operational_schema)  # [ADDED]
+    account_df = spark.createDataFrame(account_data, account_schema)
+    transaction_df = spark.createDataFrame(transaction_data, transaction_schema)
+    
+    return {
+        "customer": customer_df,
+        "branch": branch_df,
+        "branch_operational": branch_operational_df,  # [ADDED]
+        "account": account_df,
+        "transaction": transaction_df
+    }
 
 def create_aml_customer_transactions(customer_df: DataFrame, account_df: DataFrame, transaction_df: DataFrame) -> DataFrame:
     """
     Creates the AML_CUSTOMER_TRANSACTIONS DataFrame by joining customer, account, and transaction data.
-    # [MODIFIED] - Enhanced with better error handling and validation
-    
-    :param customer_df: DataFrame with customer data.
-    :param account_df: DataFrame with account data.
-    :param transaction_df: DataFrame with transaction data.
-    :return: A DataFrame ready for the AML customer transactions report.
+    # [UNCHANGED] - Original logic preserved
     """
     logger.info("Creating AML Customer Transactions DataFrame.")
-    
-    # [ADDED] - Data validation before processing
-    if customer_df.count() == 0 or account_df.count() == 0 or transaction_df.count() == 0:
-        logger.warning("One or more source DataFrames are empty")
-    
-    result_df = customer_df.join(account_df, "CUSTOMER_ID") \
-                          .join(transaction_df, "ACCOUNT_ID") \
-                          .select(
-                              col("CUSTOMER_ID"),
-                              col("NAME"),
-                              col("ACCOUNT_ID"),
-                              col("TRANSACTION_ID"),
-                              col("AMOUNT"),
-                              col("TRANSACTION_TYPE"),
-                              col("TRANSACTION_DATE")
-                          )
-    
-    # [ADDED] - Log record count for validation
-    record_count = result_df.count()
-    logger.info(f"AML Customer Transactions created with {record_count} records")
-    
-    return result_df
+    return customer_df.join(account_df, "CUSTOMER_ID") \
+                      .join(transaction_df, "ACCOUNT_ID") \
+                      .select(
+                          col("CUSTOMER_ID"),
+                          col("NAME"),
+                          col("ACCOUNT_ID"),
+                          col("TRANSACTION_ID"),
+                          col("AMOUNT"),
+                          col("TRANSACTION_TYPE"),
+                          col("TRANSACTION_DATE")
+                      )
 
+# [MODIFIED] - Enhanced function to include branch operational details
 def create_branch_summary_report(transaction_df: DataFrame, account_df: DataFrame, branch_df: DataFrame, branch_operational_df: DataFrame) -> DataFrame:
     """
-    # [MODIFIED] - Enhanced to include BRANCH_OPERATIONAL_DETAILS integration
-    Creates the BRANCH_SUMMARY_REPORT DataFrame by aggregating transaction data at the branch level
-    and integrating operational details based on technical specifications.
-    
-    :param transaction_df: DataFrame with transaction data.
-    :param account_df: DataFrame with account data.
-    :param branch_df: DataFrame with branch data.
-    :param branch_operational_df: DataFrame with branch operational details (NEW).
-    :return: A DataFrame containing the enhanced branch summary report.
+    Creates the BRANCH_SUMMARY_REPORT DataFrame by aggregating transaction data at the branch level.
+    # [MODIFIED] - Added branch_operational_df parameter and enhanced logic to include REGION and LAST_AUDIT_DATE
     """
     logger.info("Creating Enhanced Branch Summary Report DataFrame with operational details.")
     
-    # [MODIFIED] - Original aggregation logic preserved
+    # [MODIFIED] - Enhanced aggregation with additional joins and fields
     base_summary = transaction_df.join(account_df, "ACCOUNT_ID") \
                                  .join(branch_df, "BRANCH_ID") \
                                  .groupBy("BRANCH_ID", "BRANCH_NAME") \
@@ -169,83 +198,97 @@ def create_branch_summary_report(transaction_df: DataFrame, account_df: DataFram
                                      sum("AMOUNT").alias("TOTAL_AMOUNT")
                                  )
     
-    # [ADDED] - Integration with BRANCH_OPERATIONAL_DETAILS as per technical specifications
-    # Join with branch operational details using BRANCH_ID
-    enhanced_summary = base_summary.join(branch_operational_df, "BRANCH_ID", "left")
+    # [ADDED] - Join with branch operational details to include REGION and LAST_AUDIT_DATE
+    enhanced_summary = base_summary.join(branch_operational_df, "BRANCH_ID", "left") \
+                                  .select(
+                                      col("BRANCH_ID").cast(LongType()),  # [MODIFIED] - Cast to match target schema
+                                      col("BRANCH_NAME"),
+                                      col("TOTAL_TRANSACTIONS"),
+                                      col("TOTAL_AMOUNT").cast(DoubleType()),  # [MODIFIED] - Cast to match target schema
+                                      coalesce(col("REGION"), lit("Unknown")).alias("REGION"),  # [ADDED] - Handle null regions
+                                      col("LAST_AUDIT_DATE").cast(StringType()).alias("LAST_AUDIT_DATE")  # [ADDED] - Cast date to string as per target schema
+                                  )
     
-    # [ADDED] - Conditional population of REGION and LAST_AUDIT_DATE based on IS_ACTIVE = 'Y'
-    final_summary = enhanced_summary.withColumn(
-        "REGION", 
-        when(col("IS_ACTIVE") == "Y", col("REGION")).otherwise(lit(None))
-    ).withColumn(
-        "LAST_AUDIT_DATE", 
-        when(col("IS_ACTIVE") == "Y", col("LAST_AUDIT_DATE")).otherwise(lit(None))
-    ).select(
-        col("BRANCH_ID"),
-        col("BRANCH_NAME"),
-        col("TOTAL_TRANSACTIONS"),
-        col("TOTAL_AMOUNT"),
-        col("REGION"),  # [ADDED] - New column from operational details
-        col("LAST_AUDIT_DATE")  # [ADDED] - New column from operational details
-    )
-    
-    # [ADDED] - Log enhanced record count for validation
-    record_count = final_summary.count()
-    logger.info(f"Enhanced Branch Summary Report created with {record_count} records")
-    
-    return final_summary
+    return enhanced_summary
 
+# [MODIFIED] - Enhanced write function with merge capability
 def write_to_delta_table(df: DataFrame, table_name: str, mode: str = "overwrite"):
     """
-    # [MODIFIED] - Enhanced Delta table writing with better error handling
-    Writes a DataFrame to a Delta table with improved error handling and logging.
-    
-    :param df: The DataFrame to write.
-    :param table_name: The name of the target Delta table.
-    :param mode: Write mode (default: overwrite)
+    Writes a DataFrame to a Delta table with enhanced error handling.
+    # [MODIFIED] - Added mode parameter and enhanced error handling
     """
-    logger.info(f"Writing DataFrame to Delta table: {table_name} in {mode} mode")
+    logger.info(f"Writing DataFrame to Delta table: {table_name} with mode: {mode}")
     try:
-        # [ADDED] - Record count logging before write
-        record_count = df.count()
-        logger.info(f"Writing {record_count} records to {table_name}")
-        
         df.write.format("delta") \
           .mode(mode) \
           .option("mergeSchema", "true") \
           .saveAsTable(table_name)  # [MODIFIED] - Added mergeSchema option for schema evolution
-        
-        logger.info(f"Successfully written {record_count} records to {table_name}")
+        logger.info(f"Successfully written data to {table_name}")
     except Exception as e:
         logger.error(f"Failed to write to Delta table {table_name}: {e}")
         raise
 
+# [ADDED] - New function for merge operations
+def merge_to_delta_table(source_df: DataFrame, target_table: str, merge_keys: list):
+    """
+    Performs merge operation to Delta table for upsert functionality.
+    # [ADDED] - New merge functionality for incremental updates
+    """
+    logger.info(f"Performing merge operation on Delta table: {target_table}")
+    try:
+        # Check if table exists
+        spark = SparkSession.getActiveSession()
+        if spark.catalog.tableExists(target_table):
+            delta_table = DeltaTable.forName(spark, target_table)
+            
+            # Build merge condition
+            merge_condition = " AND ".join([f"target.{key} = source.{key}" for key in merge_keys])
+            
+            delta_table.alias("target") \
+                .merge(source_df.alias("source"), merge_condition) \
+                .whenMatchedUpdateAll() \
+                .whenNotMatchedInsertAll() \
+                .execute()
+            
+            logger.info(f"Successfully merged data to {target_table}")
+        else:
+            # If table doesn't exist, create it
+            write_to_delta_table(source_df, target_table, "overwrite")
+            
+    except Exception as e:
+        logger.error(f"Failed to merge to Delta table {target_table}: {e}")
+        raise
+
+# [ADDED] - Data validation function
 def validate_data_quality(df: DataFrame, table_name: str) -> bool:
     """
-    # [ADDED] - Data quality validation function
-    Performs basic data quality checks on the DataFrame.
-    
-    :param df: DataFrame to validate
-    :param table_name: Name of the table for logging
-    :return: Boolean indicating if validation passed
+    Validates data quality for the given DataFrame.
+    # [ADDED] - New data quality validation functionality
     """
-    logger.info(f"Performing data quality validation for {table_name}")
+    logger.info(f"Validating data quality for {table_name}")
     
     try:
-        # Check for empty DataFrame
-        record_count = df.count()
-        if record_count == 0:
-            logger.warning(f"{table_name} is empty")
-            return False
-        
-        # Check for null values in key columns
+        # Check for null values in critical columns
         if table_name == "BRANCH_SUMMARY_REPORT":
-            null_branch_ids = df.filter(col("BRANCH_ID").isNull()).count()
-            if null_branch_ids > 0:
-                logger.error(f"{table_name} has {null_branch_ids} records with null BRANCH_ID")
+            null_checks = df.filter(
+                col("BRANCH_ID").isNull() | 
+                col("BRANCH_NAME").isNull() |
+                col("TOTAL_TRANSACTIONS").isNull() |
+                col("TOTAL_AMOUNT").isNull()
+            ).count()
+            
+            if null_checks > 0:
+                logger.warning(f"Found {null_checks} rows with null values in critical columns")
                 return False
         
-        logger.info(f"Data quality validation passed for {table_name} with {record_count} records")
+        # Check for negative amounts
+        if "TOTAL_AMOUNT" in df.columns:
+            negative_amounts = df.filter(col("TOTAL_AMOUNT") < 0).count()
+            if negative_amounts > 0:
+                logger.warning(f"Found {negative_amounts} rows with negative amounts")
+                return False
+        
+        logger.info(f"Data quality validation passed for {table_name}")
         return True
         
     except Exception as e:
@@ -254,84 +297,60 @@ def validate_data_quality(df: DataFrame, table_name: str) -> bool:
 
 def main():
     """
-    # [MODIFIED] - Enhanced main function with sample data and improved error handling
-    Main ETL execution function with enhanced functionality.
+    Main ETL execution function.
+    # [MODIFIED] - Enhanced with new data sources and validation
     """
     spark = None
     try:
         spark = get_spark_session()
         
-        # [MODIFIED] - Replaced JDBC reading with sample data creation
-        # Create sample data instead of reading from JDBC
-        customer_df, account_df, transaction_df, branch_df, branch_operational_df = create_sample_data(spark)
+        # [MODIFIED] - Use sample data instead of JDBC connections for self-contained execution
+        logger.info("Creating sample data for self-contained execution")
+        sample_data = create_sample_data(spark)
         
-        # [DEPRECATED] - JDBC connection logic commented out
-        # jdbc_url = "jdbc:oracle:thin:@your_oracle_host:1521:orcl"
-        # connection_properties = {
-        #     "user": "your_user",
-        #     "password": "your_password",
-        #     "driver": "oracle.jdbc.driver.OracleDriver"
-        # }
-        # customer_df = read_table(spark, jdbc_url, "CUSTOMER", connection_properties)
-        # account_df = read_table(spark, jdbc_url, "ACCOUNT", connection_properties)
-        # transaction_df = read_table(spark, jdbc_url, "TRANSACTION", connection_properties)
-        # branch_df = read_table(spark, jdbc_url, "BRANCH", connection_properties)
+        customer_df = sample_data["customer"]
+        account_df = sample_data["account"]
+        transaction_df = sample_data["transaction"]
+        branch_df = sample_data["branch"]
+        branch_operational_df = sample_data["branch_operational"]  # [ADDED]
+        
+        # [UNCHANGED] - Create and write AML_CUSTOMER_TRANSACTIONS
+        aml_transactions_df = create_aml_customer_transactions(customer_df, account_df, transaction_df)
         
         # [ADDED] - Data quality validation
-        logger.info("Performing data quality validations...")
-        validations = [
-            validate_data_quality(customer_df, "CUSTOMER"),
-            validate_data_quality(account_df, "ACCOUNT"),
-            validate_data_quality(transaction_df, "TRANSACTION"),
-            validate_data_quality(branch_df, "BRANCH"),
-            validate_data_quality(branch_operational_df, "BRANCH_OPERATIONAL_DETAILS")
-        ]
-        
-        if not all(validations):
-            logger.error("Data quality validation failed. Stopping ETL process.")
-            return
-        
-        # Create and write AML_CUSTOMER_TRANSACTIONS (unchanged logic)
-        aml_transactions_df = create_aml_customer_transactions(customer_df, account_df, transaction_df)
         if validate_data_quality(aml_transactions_df, "AML_CUSTOMER_TRANSACTIONS"):
             write_to_delta_table(aml_transactions_df, "AML_CUSTOMER_TRANSACTIONS")
+        else:
+            logger.error("Data quality validation failed for AML_CUSTOMER_TRANSACTIONS")
+            raise Exception("Data quality validation failed")
         
         # [MODIFIED] - Create and write enhanced BRANCH_SUMMARY_REPORT with operational details
         branch_summary_df = create_branch_summary_report(transaction_df, account_df, branch_df, branch_operational_df)
+        
+        # [ADDED] - Data quality validation for branch summary
         if validate_data_quality(branch_summary_df, "BRANCH_SUMMARY_REPORT"):
-            write_to_delta_table(branch_summary_df, "BRANCH_SUMMARY_REPORT")
+            write_to_delta_table(branch_summary_df, "workspace.default.branch_summary_report")
+        else:
+            logger.error("Data quality validation failed for BRANCH_SUMMARY_REPORT")
+            raise Exception("Data quality validation failed")
         
         # [ADDED] - Display sample results for verification
-        logger.info("Displaying sample results...")
-        print("\n=== AML CUSTOMER TRANSACTIONS (Sample) ===")
+        logger.info("Displaying sample results:")
+        print("\n=== AML Customer Transactions Sample ===")
         aml_transactions_df.show(5, truncate=False)
         
-        print("\n=== ENHANCED BRANCH SUMMARY REPORT (Sample) ===")
-        branch_summary_df.show(10, truncate=False)
+        print("\n=== Enhanced Branch Summary Report Sample ===")
+        branch_summary_df.show(truncate=False)
         
-        logger.info("ETL job completed successfully with enhancements.")
+        logger.info("Enhanced ETL job completed successfully with operational details integration.")
         
     except Exception as e:
         logger.error(f"ETL job failed with exception: {e}")
-        raise  # [MODIFIED] - Re-raise exception for proper error handling
+        raise
     finally:
         if spark:
-            # [MODIFIED] - Conditional spark.stop() for Spark Connect compatibility
-            try:
-                spark.stop()
-                logger.info("Spark session stopped.")
-            except:
-                logger.info("Spark session cleanup handled by environment.")
+            # [MODIFIED] - Removed spark.stop() for Spark Connect compatibility
+            logger.info("ETL execution completed.")
 
 if __name__ == "__main__":
     main()
-
-# [ADDED] - Summary of Changes:
-# 1. Integrated BRANCH_OPERATIONAL_DETAILS table as per technical specifications
-# 2. Enhanced create_branch_summary_report function with conditional logic for REGION and LAST_AUDIT_DATE
-# 3. Added comprehensive sample data creation for testing
-# 4. Improved Spark Connect compatibility
-# 5. Added data quality validation functions
-# 6. Enhanced error handling and logging throughout
-# 7. Preserved backward compatibility by commenting out deprecated code
-# 8. Added detailed annotations for all modifications
