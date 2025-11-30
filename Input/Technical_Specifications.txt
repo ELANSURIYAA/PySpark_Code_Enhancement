@@ -1,0 +1,131 @@
+=============================================
+Author: Ascendion AVA+
+Date: <Leave it blank>
+Description: Technical specification for integrating BRANCH_OPERATIONAL_DETAILS into BRANCH_SUMMARY_REPORT
+=============================================
+
+# Technical Specification for BRANCH_SUMMARY_REPORT Enhancement
+
+## Introduction
+This document outlines the technical specifications for integrating the new source table `BRANCH_OPERATIONAL_DETAILS` into the `BRANCH_SUMMARY_REPORT` table. The enhancement aims to improve compliance and audit readiness by incorporating branch-level operational metadata.
+
+## Code Changes
+### Impacted Modules
+- PySpark ETL logic for `BRANCH_SUMMARY_REPORT`
+- Data validation and reconciliation routines
+
+### Logic Changes
+1. **Join Logic**:
+   - Join `BRANCH_OPERATIONAL_DETAILS` with `BRANCH_SUMMARY_REPORT` using `BRANCH_ID`.
+2. **Conditional Population**:
+   - Populate `REGION` and `LAST_AUDIT_DATE` columns based on `IS_ACTIVE = 'Y'`.
+
+### Pseudocode
+```python
+# Join BRANCH_OPERATIONAL_DETAILS with BRANCH_SUMMARY_REPORT
+branch_summary = branch_summary.join(branch_operational_details, "BRANCH_ID")
+
+# Populate new columns conditionally
+branch_summary = branch_summary.withColumn(
+    "REGION", when(branch_operational_details["IS_ACTIVE"] == 'Y', branch_operational_details["REGION"])
+).withColumn(
+    "LAST_AUDIT_DATE", when(branch_operational_details["IS_ACTIVE"] == 'Y', branch_operational_details["LAST_AUDIT_DATE"])
+)
+```
+
+## Data Model Updates
+### Source Data Model
+#### BRANCH_OPERATIONAL_DETAILS
+| Column Name       | Data Type   | Description                      |
+|-------------------|-------------|----------------------------------|
+| BRANCH_ID         | INT         | Unique identifier for the branch |
+| REGION            | VARCHAR2(50)| Region of the branch             |
+| MANAGER_NAME      | VARCHAR2(100)| Name of the branch manager       |
+| LAST_AUDIT_DATE   | DATE        | Last audit date                  |
+| IS_ACTIVE         | CHAR(1)     | Active status indicator          |
+
+### Target Data Model
+#### BRANCH_SUMMARY_REPORT
+| Column Name       | Data Type   | Description                      |
+|-------------------|-------------|----------------------------------|
+| BRANCH_ID         | INT         | Unique identifier for the branch |
+| BRANCH_NAME       | STRING      | Name of the branch               |
+| TOTAL_TRANSACTIONS| BIGINT      | Total number of transactions     |
+| TOTAL_AMOUNT      | DOUBLE      | Total transaction amount         |
+| REGION            | STRING      | Region of the branch             |
+| LAST_AUDIT_DATE   | DATE        | Last audit date                  |
+
+## Source-to-Target Mapping
+| Source Column                  | Target Column                  | Transformation Rule              |
+|--------------------------------|---------------------------------|----------------------------------|
+| BRANCH_OPERATIONAL_DETAILS.REGION | BRANCH_SUMMARY_REPORT.REGION | Populate if IS_ACTIVE = 'Y'     |
+| BRANCH_OPERATIONAL_DETAILS.LAST_AUDIT_DATE | BRANCH_SUMMARY_REPORT.LAST_AUDIT_DATE | Populate if IS_ACTIVE = 'Y' |
+
+## Assumptions and Constraints
+- The `BRANCH_OPERATIONAL_DETAILS` table is populated and maintained by the databricks database.
+- The `BRANCH_SUMMARY_REPORT` table is stored in Databricks Delta.
+- Backward compatibility with older records must be maintained.
+- Deployment requires a full reload of the `BRANCH_SUMMARY_REPORT` table.
+
+## References
+- JIRA Story: Extend BRANCH_SUMMARY_REPORT Logic to Integrate New Source Table
+- Confluence Documentation: ETL Change - Integration of BRANCH_OPERATIONAL_DETAILS into BRANCH_SUMMARY_REPORT
+- Source DDL: BRANCH_OPERATIONAL_DETAILS
+- Target DDL: BRANCH_SUMMARY_REPORT
+
+
+
+DDL:
+-- 1. CUSTOMER Table
+CREATE TABLE IF NOT EXISTS CUSTOMER (
+    CUSTOMER_ID INT,
+    NAME STRING NOT NULL,
+    EMAIL STRING,
+    PHONE STRING,
+    ADDRESS STRING,
+    CREATED_DATE DATE DEFAULT CURRENT_DATE
+);
+
+-- 2. BRANCH Table
+CREATE TABLE IF NOT EXISTS BRANCH (
+    BRANCH_ID INT,
+    BRANCH_NAME STRING NOT NULL,
+    BRANCH_CODE STRING,
+    CITY STRING,
+    STATE STRING,
+    COUNTRY STRING
+);
+
+-- 3. ACCOUNT Table
+CREATE TABLE IF NOT EXISTS ACCOUNT (
+    ACCOUNT_ID INT,
+    CUSTOMER_ID INT,
+    BRANCH_ID INT,
+    ACCOUNT_NUMBER STRING,
+    ACCOUNT_TYPE STRING,
+    BALANCE DECIMAL(15,2) DEFAULT 0,
+    OPENED_DATE DATE DEFAULT CURRENT_DATE
+);
+
+-- 4. TRANSACTION Table
+CREATE TABLE IF NOT EXISTS TRANSACTION (
+    TRANSACTION_ID INT,
+    ACCOUNT_ID INT,
+    TRANSACTION_TYPE STRING NOT NULL,
+    AMOUNT DECIMAL(15,2) NOT NULL,
+    TRANSACTION_DATE DATE DEFAULT CURRENT_DATE,
+    DESCRIPTION STRING
+);
+
+-- 5. BRANCH_OPERATIONAL_DETAILS Table (New Source)
+CREATE TABLE IF NOT EXISTS BRANCH_OPERATIONAL_DETAILS (
+    BRANCH_ID INT,
+    REGION STRING NOT NULL,
+    MANAGER_NAME STRING,
+    LAST_AUDIT_DATE DATE,
+    IS_ACTIVE STRING DEFAULT 'Y'
+);
+
+target table:
+
+CREATE TABLE workspace.default.branch_summary_report ( BRANCH_ID BIGINT, BRANCH_NAME STRING, TOTAL_TRANSACTIONS BIGINT, TOTAL_AMOUNT DOUBLE, REGION STRING, LAST_AUDIT_DATE STRING) USING delta TBLPROPERTIES ( 'delta.enableDeletionVectors' = 'true', 'delta.feature.appendOnly' = 'supported', 'delta.feature.deletionVectors' = 'supported', 'delta.feature.invariants' = 'supported', 'delta.minReaderVersion' = '3', 'delta.minWriterVersion' = '7', 'delta.parquet.compression.codec' = 'zstd')
