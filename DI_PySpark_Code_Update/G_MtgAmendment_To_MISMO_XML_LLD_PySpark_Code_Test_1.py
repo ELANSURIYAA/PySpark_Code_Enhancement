@@ -1,7 +1,7 @@
 _____________________________________________
 ## *Author*: AAVA
 ## *Created on*:   
-## *Description*: Test script for Mortgage Amendment to MISMO XML PySpark Pipeline
+## *Description*: Python test script for testing PySpark Mortgage Amendment to MISMO XML ETL job
 ## *Version*: 1 
 ## *Updated on*: 
 _____________________________________________
@@ -9,272 +9,384 @@ _____________________________________________
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
-from delta import *
+from datetime import datetime
 import sys
 import os
-import tempfile
-from datetime import datetime
 
-# Import the main ETL class
+# Add the pipeline module to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-class TestMortgageAmendmentETL:
+class MortgageAmendmentETLTester:
     def __init__(self):
-        """Initialize test environment"""
-        self.spark = SparkSession.getActiveSession()
-        if self.spark is None:
-            self.spark = SparkSession.builder \
-                .appName("Test_G_MtgAmendment_To_MISMO_XML") \
-                .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
-                .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
-                .getOrCreate()
-        
-        # Create temporary directory for test outputs
-        self.temp_dir = tempfile.mkdtemp()
+        """Initialize the test framework"""
+        self.spark = self._get_spark_session()
         self.test_results = []
+        
+    def _get_spark_session(self):
+        """Get or create Spark session for testing"""
+        try:
+            spark = SparkSession.getActiveSession()
+            if spark is None:
+                spark = SparkSession.builder \
+                    .appName("MortgageAmendmentETLTest") \
+                    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+                    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+                    .getOrCreate()
+            return spark
+        except Exception as e:
+            print(f"Error creating Spark session: {e}")
+            raise
     
-    def create_test_data_scenario1(self):
+    def create_test_data_scenario_1(self):
         """Create test data for Scenario 1: Insert new records"""
         # New records that don't exist in target
-        landing_data = [
-            ("evt_new_001", "loan_new_001", "MORTGAGE_AMENDMENT", 
-             '{"amendment_type":"RATE_CHANGE","effective_date":"2024-02-01","new_rate":"3.75"}', 
+        test_data = [
+            ("evt_new_001", "loan_new_12345", "MORTGAGE_AMENDMENT", 
+             '{"amendment_type":"RATE_CHANGE","effective_date":"2024-02-15","new_rate":"3.25","borrower_name":"Alice Johnson","property_address":"789 Pine St"}',
              datetime.now()),
-            ("evt_new_002", "loan_new_002", "MORTGAGE_AMENDMENT", 
-             '{"amendment_type":"TERM_CHANGE","effective_date":"2024-02-02","new_term":"25"}', 
+            ("evt_new_002", "loan_new_67890", "MORTGAGE_AMENDMENT", 
+             '{"amendment_type":"TERM_CHANGE","effective_date":"2024-02-20","new_term":"240","borrower_name":"Bob Wilson","property_address":"321 Elm Ave"}',
              datetime.now())
         ]
         
-        template_data = [
-            ("MISMO_TEMPLATE_001", 
-             """<?xml version="1.0" encoding="UTF-8"?>
-<MISMO_DOCUMENT>
-    <LOAN_ID>{{LOAN_ID}}</LOAN_ID>
+        template_data = [(
+            "MISMO_TEMPLATE_001",
+            '''<?xml version="1.0" encoding="UTF-8"?>
+<MISMO_AMENDMENT>
     <EVENT_ID>{{EVENT_ID}}</EVENT_ID>
+    <LOAN_ID>{{LOAN_ID}}</LOAN_ID>
     <AMENDMENT_TYPE>{{AMENDMENT_TYPE}}</AMENDMENT_TYPE>
     <EFFECTIVE_DATE>{{EFFECTIVE_DATE}}</EFFECTIVE_DATE>
     <NEW_RATE>{{NEW_RATE}}</NEW_RATE>
-</MISMO_DOCUMENT>""")
-        ]
+    <BORROWER_NAME>{{BORROWER_NAME}}</BORROWER_NAME>
+    <PROPERTY_ADDRESS>{{PROPERTY_ADDRESS}}</PROPERTY_ADDRESS>
+    <GENERATED_TIMESTAMP>{}</GENERATED_TIMESTAMP>
+</MISMO_AMENDMENT>'''.format(datetime.now().isoformat())
+        )]
         
-        return landing_data, template_data
+        return test_data, template_data
     
-    def create_test_data_scenario2(self):
+    def create_test_data_scenario_2(self):
         """Create test data for Scenario 2: Update existing records"""
         # Records with existing keys but updated values
-        landing_data = [
-            ("evt_update_001", "loan_existing_001", "MORTGAGE_AMENDMENT", 
-             '{"amendment_type":"RATE_CHANGE","effective_date":"2024-02-15","new_rate":"4.25"}', 
+        test_data = [
+            ("evt_update_001", "loan_existing_12345", "MORTGAGE_AMENDMENT", 
+             '{"amendment_type":"RATE_CHANGE","effective_date":"2024-03-15","new_rate":"2.95","borrower_name":"Charlie Brown Updated","property_address":"456 Updated St"}',
              datetime.now()),
-            ("evt_update_002", "loan_existing_002", "MORTGAGE_AMENDMENT", 
-             '{"amendment_type":"RATE_CHANGE","effective_date":"2024-02-16","new_rate":"4.50"}', 
+            ("evt_update_002", "loan_existing_67890", "MORTGAGE_AMENDMENT", 
+             '{"amendment_type":"PAYMENT_CHANGE","effective_date":"2024-03-20","new_payment":"2500","borrower_name":"Diana Prince Updated","property_address":"789 Updated Ave"}',
              datetime.now())
         ]
         
-        # Existing target data to simulate updates
-        existing_target_data = [
-            ("evt_old_001", "loan_existing_001", 
-             """<?xml version="1.0" encoding="UTF-8"?>
-<MISMO_DOCUMENT>
-    <LOAN_ID>loan_existing_001</LOAN_ID>
-    <EVENT_ID>evt_old_001</EVENT_ID>
+        # Existing records in target (simulating current state)
+        existing_data = [
+            ("evt_existing_001", "loan_existing_12345", 
+             '''<?xml version="1.0" encoding="UTF-8"?>
+<MISMO_AMENDMENT>
+    <EVENT_ID>evt_existing_001</EVENT_ID>
+    <LOAN_ID>loan_existing_12345</LOAN_ID>
     <AMENDMENT_TYPE>RATE_CHANGE</AMENDMENT_TYPE>
     <EFFECTIVE_DATE>2024-01-15</EFFECTIVE_DATE>
-    <NEW_RATE>3.50</NEW_RATE>
-</MISMO_DOCUMENT>""", 
-             datetime(2024, 1, 15)),
-            ("evt_old_002", "loan_existing_002", 
-             """<?xml version="1.0" encoding="UTF-8"?>
-<MISMO_DOCUMENT>
-    <LOAN_ID>loan_existing_002</LOAN_ID>
-    <EVENT_ID>evt_old_002</EVENT_ID>
-    <AMENDMENT_TYPE>RATE_CHANGE</AMENDMENT_TYPE>
-    <EFFECTIVE_DATE>2024-01-16</EFFECTIVE_DATE>
     <NEW_RATE>3.75</NEW_RATE>
-</MISMO_DOCUMENT>""", 
-             datetime(2024, 1, 16))
+    <BORROWER_NAME>Charlie Brown</BORROWER_NAME>
+    <PROPERTY_ADDRESS>456 Original St</PROPERTY_ADDRESS>
+</MISMO_AMENDMENT>''',
+             datetime(2024, 1, 15)),
+            ("evt_existing_002", "loan_existing_67890", 
+             '''<?xml version="1.0" encoding="UTF-8"?>
+<MISMO_AMENDMENT>
+    <EVENT_ID>evt_existing_002</EVENT_ID>
+    <LOAN_ID>loan_existing_67890</LOAN_ID>
+    <AMENDMENT_TYPE>TERM_CHANGE</AMENDMENT_TYPE>
+    <EFFECTIVE_DATE>2024-01-20</EFFECTIVE_DATE>
+    <NEW_TERM>360</NEW_TERM>
+    <BORROWER_NAME>Diana Prince</BORROWER_NAME>
+    <PROPERTY_ADDRESS>789 Original Ave</PROPERTY_ADDRESS>
+</MISMO_AMENDMENT>''',
+             datetime(2024, 1, 20))
         ]
         
-        template_data = [
-            ("MISMO_TEMPLATE_001", 
-             """<?xml version="1.0" encoding="UTF-8"?>
-<MISMO_DOCUMENT>
-    <LOAN_ID>{{LOAN_ID}}</LOAN_ID>
+        template_data = [(
+            "MISMO_TEMPLATE_001",
+            '''<?xml version="1.0" encoding="UTF-8"?>
+<MISMO_AMENDMENT>
     <EVENT_ID>{{EVENT_ID}}</EVENT_ID>
+    <LOAN_ID>{{LOAN_ID}}</LOAN_ID>
     <AMENDMENT_TYPE>{{AMENDMENT_TYPE}}</AMENDMENT_TYPE>
     <EFFECTIVE_DATE>{{EFFECTIVE_DATE}}</EFFECTIVE_DATE>
     <NEW_RATE>{{NEW_RATE}}</NEW_RATE>
-</MISMO_DOCUMENT>""")
-        ]
+    <BORROWER_NAME>{{BORROWER_NAME}}</BORROWER_NAME>
+    <PROPERTY_ADDRESS>{{PROPERTY_ADDRESS}}</PROPERTY_ADDRESS>
+    <GENERATED_TIMESTAMP>{}</GENERATED_TIMESTAMP>
+</MISMO_AMENDMENT>'''.format(datetime.now().isoformat())
+        )]
         
-        return landing_data, existing_target_data, template_data
+        return test_data, existing_data, template_data
     
-    def run_etl_test(self, landing_data, template_data, scenario_name):
-        """Run ETL pipeline with test data"""
-        try:
-            # Import and initialize ETL class
-            from G_MtgAmendment_To_MISMO_XML_LLD_PySpark_Code_Pipeline_1 import MortgageAmendmentToMISMOXML
-            
-            etl_job = MortgageAmendmentToMISMOXML()
-            
-            # Override the create_sample_data method for testing
-            etl_job.create_sample_data = lambda: (landing_data, template_data)
-            
-            # Run the ETL pipeline
-            results = etl_job.run_etl_pipeline()
-            
-            return results
-            
-        except Exception as e:
-            print(f"Error in {scenario_name}: {str(e)}")
-            return None
-    
-    def validate_scenario1_results(self, results, input_data):
-        """Validate Scenario 1: Insert results"""
-        test_result = {
-            "scenario": "Scenario 1: Insert",
-            "status": "FAIL",
-            "input_count": len(input_data[0]),
-            "output_count": 0,
-            "details": ""
-        }
+    def run_etl_with_test_data(self, test_data, template_data):
+        """Run ETL with specific test data"""
+        from G_MtgAmendment_To_MISMO_XML_LLD_PySpark_Code_Pipeline_1 import MortgageAmendmentToMISMOXML
         
-        try:
-            if results and results['xml_output']:
-                output_count = results['xml_output'].count()
-                expected_count = len(input_data[0])
-                
-                test_result["output_count"] = output_count
-                
-                if output_count == expected_count:
-                    # Verify XML content contains expected loan IDs
-                    xml_df = results['xml_output']
-                    loan_ids = [row['loan_id'] for row in xml_df.collect()]
-                    expected_loan_ids = ["loan_new_001", "loan_new_002"]
-                    
-                    if all(loan_id in loan_ids for loan_id in expected_loan_ids):
-                        test_result["status"] = "PASS"
-                        test_result["details"] = f"Successfully inserted {output_count} records with correct loan IDs"
-                    else:
-                        test_result["details"] = "Loan IDs mismatch in output"
-                else:
-                    test_result["details"] = f"Expected {expected_count} records, got {output_count}"
-            else:
-                test_result["details"] = "No XML output generated"
-                
-        except Exception as e:
-            test_result["details"] = f"Validation error: {str(e)}"
+        # Create ETL instance
+        etl_job = MortgageAmendmentToMISMOXML()
         
-        return test_result
+        # Override the create_sample_data method with test data
+        etl_job.create_sample_data = lambda: (test_data, template_data)
+        
+        # Run ETL
+        xml_output, rejects, raw_events = etl_job.run_etl()
+        
+        return xml_output, rejects, raw_events
     
-    def validate_scenario2_results(self, results, input_data, existing_data):
-        """Validate Scenario 2: Update results"""
-        test_result = {
-            "scenario": "Scenario 2: Update",
-            "status": "FAIL",
-            "input_count": len(input_data[0]),
-            "output_count": 0,
-            "details": ""
-        }
+    def validate_insert_scenario(self, xml_output, expected_count):
+        """Validate insert scenario results"""
+        actual_count = xml_output.count()
+        
+        # Check if all expected records are inserted
+        success = actual_count == expected_count
+        
+        # Validate XML content contains expected tokens replaced
+        xml_sample = xml_output.collect()[0] if actual_count > 0 else None
+        xml_valid = False
+        
+        if xml_sample:
+            xml_content = xml_sample['xml_content']
+            # Check if tokens are replaced (no {{}} patterns should remain)
+            xml_valid = '{{' not in xml_content and '}}' not in xml_content
+        
+        return success and xml_valid, actual_count, xml_sample
+    
+    def validate_update_scenario(self, xml_output, existing_data, expected_updates):
+        """Validate update scenario results"""
+        actual_count = xml_output.count()
+        
+        # In this ETL, updates are handled as new inserts (append mode)
+        # Check if new records are created for updates
+        success = actual_count == expected_updates
+        
+        # Validate that updated content is different from original
+        xml_sample = xml_output.collect()[0] if actual_count > 0 else None
+        update_valid = False
+        
+        if xml_sample:
+            xml_content = xml_sample['xml_content']
+            # Check if tokens are replaced and content is updated
+            update_valid = ('Updated' in xml_content or '2.95' in xml_content) and '{{' not in xml_content
+        
+        return success and update_valid, actual_count, xml_sample
+    
+    def test_scenario_1_insert(self):
+        """Test Scenario 1: Insert new records into target table"""
+        print("\n" + "="*50)
+        print("TESTING SCENARIO 1: INSERT NEW RECORDS")
+        print("="*50)
         
         try:
-            if results and results['xml_output']:
-                output_count = results['xml_output'].count()
-                expected_count = len(input_data[0])
-                
-                test_result["output_count"] = output_count
-                
-                if output_count == expected_count:
-                    # Verify XML content has updated values
-                    xml_df = results['xml_output']
-                    xml_records = xml_df.collect()
-                    
-                    # Check if new rates are updated
-                    updated_rates_found = False
-                    for record in xml_records:
-                        if "4.25" in record['xml_content'] or "4.50" in record['xml_content']:
-                            updated_rates_found = True
-                            break
-                    
-                    if updated_rates_found:
-                        test_result["status"] = "PASS"
-                        test_result["details"] = f"Successfully updated {output_count} records with new rates"
-                    else:
-                        test_result["details"] = "Updated rates not found in XML output"
-                else:
-                    test_result["details"] = f"Expected {expected_count} records, got {output_count}"
-            else:
-                test_result["details"] = "No XML output generated"
-                
+            # Create test data
+            test_data, template_data = self.create_test_data_scenario_1()
+            
+            print("\nInput Data:")
+            input_df = self.spark.createDataFrame(test_data, StructType([
+                StructField("event_id", StringType(), True),
+                StructField("loan_id", StringType(), True),
+                StructField("event_type", StringType(), True),
+                StructField("json_payload", StringType(), True),
+                StructField("timestamp", TimestampType(), True)
+            ]))
+            
+            input_df.select("event_id", "loan_id", "event_type").show()
+            
+            # Run ETL
+            xml_output, rejects, raw_events = self.run_etl_with_test_data(test_data, template_data)
+            
+            # Validate results
+            is_valid, actual_count, xml_sample = self.validate_insert_scenario(xml_output, 2)
+            
+            print("\nOutput Data:")
+            xml_output.select("event_id", "loan_id").show()
+            
+            print("\nSample XML Content:")
+            if xml_sample:
+                print(xml_sample['xml_content'][:200] + "...")
+            
+            # Test result
+            status = "PASS" if is_valid else "FAIL"
+            result = {
+                'scenario': 'Insert New Records',
+                'expected_count': 2,
+                'actual_count': actual_count,
+                'status': status,
+                'details': f"Expected 2 new records, got {actual_count}"
+            }
+            
+            self.test_results.append(result)
+            print(f"\nScenario 1 Status: {status}")
+            
+            return result
+            
         except Exception as e:
-            test_result["details"] = f"Validation error: {str(e)}"
-        
-        return test_result
+            error_result = {
+                'scenario': 'Insert New Records',
+                'expected_count': 2,
+                'actual_count': 0,
+                'status': 'FAIL',
+                'details': f"Error: {str(e)}"
+            }
+            self.test_results.append(error_result)
+            print(f"\nScenario 1 Status: FAIL - {str(e)}")
+            return error_result
     
-    def run_all_tests(self):
-        """Run all test scenarios"""
-        print("\n=== Starting Mortgage Amendment ETL Tests ===")
+    def test_scenario_2_update(self):
+        """Test Scenario 2: Update existing records in target table"""
+        print("\n" + "="*50)
+        print("TESTING SCENARIO 2: UPDATE EXISTING RECORDS")
+        print("="*50)
         
-        # Test Scenario 1: Insert
-        print("\n--- Running Scenario 1: Insert Test ---")
-        scenario1_data = self.create_test_data_scenario1()
-        results1 = self.run_etl_test(scenario1_data[0], scenario1_data[1], "Scenario 1")
-        test_result1 = self.validate_scenario1_results(results1, scenario1_data)
-        self.test_results.append(test_result1)
-        
-        # Test Scenario 2: Update
-        print("\n--- Running Scenario 2: Update Test ---")
-        scenario2_data = self.create_test_data_scenario2()
-        results2 = self.run_etl_test(scenario2_data[0], scenario2_data[2], "Scenario 2")
-        test_result2 = self.validate_scenario2_results(results2, scenario2_data, scenario2_data[1])
-        self.test_results.append(test_result2)
-        
-        # Generate test report
-        self.generate_test_report()
+        try:
+            # Create test data
+            test_data, existing_data, template_data = self.create_test_data_scenario_2()
+            
+            print("\nInput Data (Updates):")
+            input_df = self.spark.createDataFrame(test_data, StructType([
+                StructField("event_id", StringType(), True),
+                StructField("loan_id", StringType(), True),
+                StructField("event_type", StringType(), True),
+                StructField("json_payload", StringType(), True),
+                StructField("timestamp", TimestampType(), True)
+            ]))
+            
+            input_df.select("event_id", "loan_id", "event_type").show()
+            
+            print("\nExisting Data (Before Update):")
+            existing_df = self.spark.createDataFrame(existing_data, StructType([
+                StructField("event_id", StringType(), True),
+                StructField("loan_id", StringType(), True),
+                StructField("xml_content", StringType(), True),
+                StructField("generated_timestamp", TimestampType(), True)
+            ]))
+            
+            existing_df.select("event_id", "loan_id").show()
+            
+            # Run ETL
+            xml_output, rejects, raw_events = self.run_etl_with_test_data(test_data, template_data)
+            
+            # Validate results
+            is_valid, actual_count, xml_sample = self.validate_update_scenario(xml_output, existing_data, 2)
+            
+            print("\nOutput Data (After Update):")
+            xml_output.select("event_id", "loan_id").show()
+            
+            print("\nSample Updated XML Content:")
+            if xml_sample:
+                print(xml_sample['xml_content'][:200] + "...")
+            
+            # Test result
+            status = "PASS" if is_valid else "FAIL"
+            result = {
+                'scenario': 'Update Existing Records',
+                'expected_count': 2,
+                'actual_count': actual_count,
+                'status': status,
+                'details': f"Expected 2 updated records, got {actual_count}"
+            }
+            
+            self.test_results.append(result)
+            print(f"\nScenario 2 Status: {status}")
+            
+            return result
+            
+        except Exception as e:
+            error_result = {
+                'scenario': 'Update Existing Records',
+                'expected_count': 2,
+                'actual_count': 0,
+                'status': 'FAIL',
+                'details': f"Error: {str(e)}"
+            }
+            self.test_results.append(error_result)
+            print(f"\nScenario 2 Status: FAIL - {str(e)}")
+            return error_result
     
     def generate_test_report(self):
         """Generate markdown test report"""
-        print("\n" + "="*60)
-        print("TEST EXECUTION REPORT")
-        print("="*60)
+        report = "\n" + "="*60 + "\n"
+        report += "# MORTGAGE AMENDMENT ETL TEST REPORT\n"
+        report += "="*60 + "\n\n"
         
-        for result in self.test_results:
-            print(f"\n## {result['scenario']}")
-            print(f"\n### Input:")
-            if result['scenario'] == "Scenario 1: Insert":
-                print("| event_id | loan_id | amendment_type | effective_date | new_rate |")
-                print("|----------|---------|----------------|----------------|----------|")
-                print("| evt_new_001 | loan_new_001 | RATE_CHANGE | 2024-02-01 | 3.75 |")
-                print("| evt_new_002 | loan_new_002 | TERM_CHANGE | 2024-02-02 | - |")
-            else:
-                print("| event_id | loan_id | amendment_type | effective_date | new_rate |")
-                print("|----------|---------|----------------|----------------|----------|")
-                print("| evt_update_001 | loan_existing_001 | RATE_CHANGE | 2024-02-15 | 4.25 |")
-                print("| evt_update_002 | loan_existing_002 | RATE_CHANGE | 2024-02-16 | 4.50 |")
+        for i, result in enumerate(self.test_results, 1):
+            report += f"## Test Scenario {i}: {result['scenario']}\n\n"
             
-            print(f"\n### Output:")
-            print(f"Records Processed: {result['output_count']}")
-            print(f"Expected Records: {result['input_count']}")
+            if result['scenario'] == 'Insert New Records':
+                report += "### Input Data:\n"
+                report += "| event_id | loan_id | event_type |\n"
+                report += "|----------|---------|------------|\n"
+                report += "| evt_new_001 | loan_new_12345 | MORTGAGE_AMENDMENT |\n"
+                report += "| evt_new_002 | loan_new_67890 | MORTGAGE_AMENDMENT |\n\n"
+                
+                report += "### Expected Output:\n"
+                report += "| event_id | loan_id | xml_generated |\n"
+                report += "|----------|---------|---------------|\n"
+                report += "| evt_new_001 | loan_new_12345 | Yes |\n"
+                report += "| evt_new_002 | loan_new_67890 | Yes |\n\n"
+                
+            elif result['scenario'] == 'Update Existing Records':
+                report += "### Input Data (Updates):\n"
+                report += "| event_id | loan_id | amendment_type |\n"
+                report += "|----------|---------|----------------|\n"
+                report += "| evt_update_001 | loan_existing_12345 | RATE_CHANGE |\n"
+                report += "| evt_update_002 | loan_existing_67890 | PAYMENT_CHANGE |\n\n"
+                
+                report += "### Expected Output:\n"
+                report += "| event_id | loan_id | xml_updated |\n"
+                report += "|----------|---------|-------------|\n"
+                report += "| evt_update_001 | loan_existing_12345 | Yes |\n"
+                report += "| evt_update_002 | loan_existing_67890 | Yes |\n\n"
             
-            print(f"\n### Status: **{result['status']}**")
-            print(f"\n### Details: {result['details']}")
-            print("\n" + "-"*50)
+            report += f"### Results:\n"
+            report += f"- **Expected Count**: {result['expected_count']}\n"
+            report += f"- **Actual Count**: {result['actual_count']}\n"
+            report += f"- **Status**: **{result['status']}**\n"
+            report += f"- **Details**: {result['details']}\n\n"
+            
+            report += "---\n\n"
         
         # Summary
-        passed_tests = sum(1 for result in self.test_results if result['status'] == 'PASS')
         total_tests = len(self.test_results)
+        passed_tests = sum(1 for r in self.test_results if r['status'] == 'PASS')
         
-        print(f"\n## SUMMARY")
-        print(f"Total Tests: {total_tests}")
-        print(f"Passed: {passed_tests}")
-        print(f"Failed: {total_tests - passed_tests}")
-        print(f"Success Rate: {(passed_tests/total_tests)*100:.1f}%")
-        print("\n" + "="*60)
+        report += "## Test Summary\n\n"
+        report += f"- **Total Tests**: {total_tests}\n"
+        report += f"- **Passed**: {passed_tests}\n"
+        report += f"- **Failed**: {total_tests - passed_tests}\n"
+        report += f"- **Success Rate**: {(passed_tests/total_tests)*100:.1f}%\n\n"
+        
+        if passed_tests == total_tests:
+            report += "🎉 **ALL TESTS PASSED!** 🎉\n"
+        else:
+            report += "⚠️ **SOME TESTS FAILED** ⚠️\n"
+        
+        return report
+    
+    def run_all_tests(self):
+        """Run all test scenarios"""
+        print("Starting Mortgage Amendment ETL Test Suite...")
+        print("=" * 60)
+        
+        # Run test scenarios
+        self.test_scenario_1_insert()
+        self.test_scenario_2_update()
+        
+        # Generate and display report
+        report = self.generate_test_report()
+        print(report)
+        
+        return self.test_results
 
 # Main execution
 if __name__ == "__main__":
-    # Initialize and run tests
-    test_runner = TestMortgageAmendmentETL()
-    test_runner.run_all_tests()
+    tester = MortgageAmendmentETLTester()
+    test_results = tester.run_all_tests()
     
-    print("\n=== Test Execution Completed ===")
+    print("\n" + "="*60)
+    print("TEST EXECUTION COMPLETED")
+    print("="*60)
