@@ -1,21 +1,19 @@
-"""
 _____________________________________________
 ## *Author*: AAVA
 ## *Created on*:   
-## *Description*: PySpark ETL job to migrate Mortgage Amendment to MISMO XML generation from Ab Initio to Spark/Databricks platform
+## *Description*: Migrate Mortgage Amendment to MISMO XML Graph to PySpark
 ## *Version*: 1 
 ## *Updated on*: 
 _____________________________________________
-"""
 
-import sys
-import re
-from datetime import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
-from pyspark import broadcast
+from delta import *
+import sys
+import re
 import logging
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -23,29 +21,16 @@ logger = logging.getLogger(__name__)
 
 class MortgageAmendmentToMISMOXML:
     def __init__(self):
-        """Initialize the PySpark ETL job for Mortgage Amendment to MISMO XML conversion"""
-        self.spark = self._get_spark_session()
-        self.setup_schemas()
+        """Initialize Spark session with Delta Lake support"""
+        self.spark = SparkSession.getActiveSession()
+        if self.spark is None:
+            self.spark = SparkSession.builder \
+                .appName("G_MtgAmendment_To_MISMO_XML") \
+                .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+                .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+                .getOrCreate()
         
-    def _get_spark_session(self):
-        """Get or create Spark session compatible with Spark Connect"""
-        try:
-            # Try to get active session first (Spark Connect compatible)
-            spark = SparkSession.getActiveSession()
-            if spark is None:
-                spark = SparkSession.builder \
-                    .appName("MortgageAmendmentToMISMOXML") \
-                    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
-                    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
-                    .getOrCreate()
-            return spark
-        except Exception as e:
-            logger.error(f"Error creating Spark session: {e}")
-            raise
-    
-    def setup_schemas(self):
-        """Define StructType schemas for all data structures"""
-        # Input Kafka Event Schema
+        # Define schemas
         self.kafka_event_schema = StructType([
             StructField("event_id", StringType(), True),
             StructField("loan_id", StringType(), True),
@@ -54,27 +39,22 @@ class MortgageAmendmentToMISMOXML:
             StructField("timestamp", TimestampType(), True)
         ])
         
-        # Event Metadata Schema (after JSON parsing)
         self.event_meta_schema = StructType([
             StructField("event_id", StringType(), True),
             StructField("loan_id", StringType(), True),
             StructField("event_type", StringType(), True),
             StructField("amendment_type", StringType(), True),
             StructField("effective_date", StringType(), True),
-            StructField("new_rate", DoubleType(), True),
-            StructField("borrower_name", StringType(), True),
-            StructField("property_address", StringType(), True),
-            StructField("loan_amount", DoubleType(), True)
+            StructField("new_rate", StringType(), True),
+            StructField("json_payload", StringType(), True)
         ])
         
-        # Template Record Schema
-        self.template_schema = StructType([
+        self.template_record_schema = StructType([
             StructField("template_id", StringType(), True),
             StructField("xml_template", StringType(), True)
         ])
         
-        # Reject Record Schema
-        self.reject_schema = StructType([
+        self.reject_record_schema = StructType([
             StructField("event_id", StringType(), True),
             StructField("loan_id", StringType(), True),
             StructField("reject_reason", StringType(), True),
@@ -82,173 +62,104 @@ class MortgageAmendmentToMISMOXML:
             StructField("timestamp", TimestampType(), True)
         ])
         
-        # XML Output Schema
-        self.xml_output_schema = StructType([
+        self.xml_out_record_schema = StructType([
             StructField("event_id", StringType(), True),
             StructField("loan_id", StringType(), True),
             StructField("xml_content", StringType(), True),
-            StructField("generated_timestamp", TimestampType(), True)
+            StructField("processed_timestamp", TimestampType(), True)
         ])
     
+    def json_find_string_value(self, json_str, key):
+        """UDF to extract values from JSON string using regex"""
+        if json_str is None:
+            return None
+        pattern = f'"({key})"\s*:\s*"([^"]*?)"'
+        match = re.search(pattern, json_str)
+        return match.group(2) if match else None
+    
+    def business_reject_reason(self, amendment_type, new_rate, effective_date):
+        """UDF to validate business rules"""
+        if effective_date is None or effective_date == "":
+            return "Missing effective_date"
+        if amendment_type == "RATE_CHANGE" and (new_rate is None or new_rate == ""):
+            return "Missing new_rate for RATE_CHANGE"
+        return None
+    
+    def render_xml(self, template, event_id, loan_id, amendment_type, effective_date, new_rate):
+        """UDF to render XML template with actual values"""
+        if template is None:
+            return None
+        
+        xml_content = template
+        xml_content = xml_content.replace("{{LOAN_ID}}", str(loan_id) if loan_id else "")
+        xml_content = xml_content.replace("{{EVENT_ID}}", str(event_id) if event_id else "")
+        xml_content = xml_content.replace("{{AMENDMENT_TYPE}}", str(amendment_type) if amendment_type else "")
+        xml_content = xml_content.replace("{{EFFECTIVE_DATE}}", str(effective_date) if effective_date else "")
+        xml_content = xml_content.replace("{{NEW_RATE}}", str(new_rate) if new_rate else "")
+        
+        return xml_content
+    
     def create_sample_data(self):
-        """Create sample data for testing since we don't have actual tables"""
-        # Sample Kafka events data
-        kafka_events_data = [
-            ("evt_001", "LOAN_12345", "MORTGAGE_AMENDMENT", 
-             '{"amendment_type":"RATE_CHANGE","effective_date":"2024-01-15","new_rate":4.5,"borrower_name":"John Doe","property_address":"123 Main St","loan_amount":250000}',
-             datetime.now()),
-            ("evt_002", "LOAN_67890", "MORTGAGE_AMENDMENT", 
-             '{"amendment_type":"TERM_CHANGE","effective_date":"2024-01-20","borrower_name":"Jane Smith","property_address":"456 Oak Ave","loan_amount":300000}',
-             datetime.now()),
-            ("evt_003", None, "MORTGAGE_AMENDMENT", 
-             '{"amendment_type":"RATE_CHANGE","effective_date":"2024-01-25","new_rate":3.8}',
-             datetime.now()),  # Missing loan_id - should be schema reject
-            ("evt_004", "LOAN_11111", "MORTGAGE_AMENDMENT", 
-             '{"amendment_type":"RATE_CHANGE","new_rate":5.2,"borrower_name":"Bob Johnson"}',
-             datetime.now())   # Missing effective_date - should be business reject
+        """Create sample data for testing"""
+        # Sample landing data
+        landing_data = [
+            ("evt_001", "loan_12345", "MORTGAGE_AMENDMENT", '{"amendment_type":"RATE_CHANGE","effective_date":"2024-01-15","new_rate":"4.5"}', datetime.now()),
+            ("evt_002", "loan_12346", "MORTGAGE_AMENDMENT", '{"amendment_type":"TERM_CHANGE","effective_date":"2024-01-16","new_term":"30"}', datetime.now()),
+            ("evt_003", None, "MORTGAGE_AMENDMENT", '{"amendment_type":"RATE_CHANGE","effective_date":"2024-01-17","new_rate":"3.8"}', datetime.now()),  # Schema reject - missing loan_id
+            ("evt_004", "loan_12348", "MORTGAGE_AMENDMENT", '{"amendment_type":"RATE_CHANGE","new_rate":"5.2"}', datetime.now()),  # Business reject - missing effective_date
+            ("evt_005", "loan_12349", "MORTGAGE_AMENDMENT", '{"amendment_type":"RATE_CHANGE","effective_date":"2024-01-18"}', datetime.now())  # Business reject - missing new_rate for RATE_CHANGE
         ]
         
-        # Sample MISMO XML template
+        # Sample template data
         template_data = [
             ("MISMO_TEMPLATE_001", 
-             '''<?xml version="1.0" encoding="UTF-8"?>
-<MISMO_LOAN_AMENDMENT>
-    <EVENT_ID>{{EVENT_ID}}</EVENT_ID>
+             """<?xml version="1.0" encoding="UTF-8"?>
+<MISMO_DOCUMENT>
     <LOAN_ID>{{LOAN_ID}}</LOAN_ID>
+    <EVENT_ID>{{EVENT_ID}}</EVENT_ID>
     <AMENDMENT_TYPE>{{AMENDMENT_TYPE}}</AMENDMENT_TYPE>
     <EFFECTIVE_DATE>{{EFFECTIVE_DATE}}</EFFECTIVE_DATE>
     <NEW_RATE>{{NEW_RATE}}</NEW_RATE>
-    <BORROWER_NAME>{{BORROWER_NAME}}</BORROWER_NAME>
-    <PROPERTY_ADDRESS>{{PROPERTY_ADDRESS}}</PROPERTY_ADDRESS>
-    <LOAN_AMOUNT>{{LOAN_AMOUNT}}</LOAN_AMOUNT>
-    <GENERATED_TIMESTAMP>{{GENERATED_TIMESTAMP}}</GENERATED_TIMESTAMP>
-</MISMO_LOAN_AMENDMENT>''')
+</MISMO_DOCUMENT>""")
         ]
         
-        return kafka_events_data, template_data
+        return landing_data, template_data
     
-    def json_find_string_value_udf(self):
-        """UDF to extract values from JSON payload using regex (simulating legacy logic)"""
-        def extract_json_value(json_str, field_name):
-            if json_str is None:
-                return None
-            try:
-                pattern = f'"({field_name})"\s*:\s*"([^"]*)"|"({field_name})"\s*:\s*([^,}}]*)'
-                match = re.search(pattern, json_str)
-                if match:
-                    return match.group(2) if match.group(2) else match.group(4)
-                return None
-            except Exception:
-                return None
-        return udf(extract_json_value, StringType())
-    
-    def json_find_double_value_udf(self):
-        """UDF to extract numeric values from JSON payload"""
-        def extract_json_double(json_str, field_name):
-            if json_str is None:
-                return None
-            try:
-                pattern = f'"({field_name})"\s*:\s*([0-9.]+)'
-                match = re.search(pattern, json_str)
-                if match:
-                    return float(match.group(2))
-                return None
-            except Exception:
-                return None
-        return udf(extract_json_double, DoubleType())
-    
-    def business_reject_reason_udf(self):
-        """UDF to determine business rejection reasons"""
-        def check_business_rules(amendment_type, effective_date, new_rate):
-            if effective_date is None or effective_date == "":
-                return "Missing effective_date"
-            if amendment_type == "RATE_CHANGE" and (new_rate is None or new_rate == 0):
-                return "Missing new_rate for RATE_CHANGE"
-            return None
-        return udf(check_business_rules, StringType())
-    
-    def render_xml_udf(self):
-        """UDF to perform token replacement in XML template"""
-        def replace_tokens(template, event_id, loan_id, amendment_type, effective_date, 
-                          new_rate, borrower_name, property_address, loan_amount):
-            if template is None:
-                return None
-            
-            xml_content = template
-            xml_content = xml_content.replace("{{EVENT_ID}}", str(event_id) if event_id else "")
-            xml_content = xml_content.replace("{{LOAN_ID}}", str(loan_id) if loan_id else "")
-            xml_content = xml_content.replace("{{AMENDMENT_TYPE}}", str(amendment_type) if amendment_type else "")
-            xml_content = xml_content.replace("{{EFFECTIVE_DATE}}", str(effective_date) if effective_date else "")
-            xml_content = xml_content.replace("{{NEW_RATE}}", str(new_rate) if new_rate else "")
-            xml_content = xml_content.replace("{{BORROWER_NAME}}", str(borrower_name) if borrower_name else "")
-            xml_content = xml_content.replace("{{PROPERTY_ADDRESS}}", str(property_address) if property_address else "")
-            xml_content = xml_content.replace("{{LOAN_AMOUNT}}", str(loan_amount) if loan_amount else "")
-            xml_content = xml_content.replace("{{GENERATED_TIMESTAMP}}", str(datetime.now()))
-            
-            return xml_content
-        
-        return udf(replace_tokens, StringType())
-    
-    def read_landing_files(self):
-        """Read pipe-delimited landing files (simulated with sample data)"""
+    def read_landing_files(self, landing_data):
+        """Read and process landing files"""
         logger.info("Reading landing files...")
         
-        kafka_events_data, template_data = self.create_sample_data()
+        # Create DataFrame from sample data
+        landing_df = self.spark.createDataFrame(landing_data, self.kafka_event_schema)
         
-        # Create DataFrames from sample data
-        raw_events_df = self.spark.createDataFrame(kafka_events_data, self.kafka_event_schema)
-        template_df = self.spark.createDataFrame(template_data, self.template_schema)
+        # Register UDFs
+        json_find_udf = udf(self.json_find_string_value, StringType())
         
-        logger.info(f"Loaded {raw_events_df.count()} raw events")
-        return raw_events_df, template_df
-    
-    def persist_raw_events(self, raw_events_df, output_path="/tmp/raw_events"):
-        """Persist raw events before any processing"""
-        logger.info(f"Persisting raw events to {output_path}")
-        try:
-            raw_events_df.write.mode("overwrite").option("path", output_path).saveAsTable("raw_events_table")
-            logger.info("Raw events persisted successfully")
-        except Exception as e:
-            logger.error(f"Error persisting raw events: {e}")
-    
-    def extract_metadata(self, raw_events_df):
-        """Extract metadata from JSON payload using regex UDFs"""
-        logger.info("Extracting metadata from JSON payloads...")
-        
-        json_string_udf = self.json_find_string_value_udf()
-        json_double_udf = self.json_find_double_value_udf()
-        
-        event_meta_df = raw_events_df.select(
+        # Extract metadata from JSON payload
+        event_meta_df = landing_df.select(
             col("event_id"),
             col("loan_id"),
             col("event_type"),
-            json_string_udf(col("json_payload"), lit("amendment_type")).alias("amendment_type"),
-            json_string_udf(col("json_payload"), lit("effective_date")).alias("effective_date"),
-            json_double_udf(col("json_payload"), lit("new_rate")).alias("new_rate"),
-            json_string_udf(col("json_payload"), lit("borrower_name")).alias("borrower_name"),
-            json_string_udf(col("json_payload"), lit("property_address")).alias("property_address"),
-            json_double_udf(col("json_payload"), lit("loan_amount")).alias("loan_amount")
+            json_find_udf(col("json_payload"), lit("amendment_type")).alias("amendment_type"),
+            json_find_udf(col("json_payload"), lit("effective_date")).alias("effective_date"),
+            json_find_udf(col("json_payload"), lit("new_rate")).alias("new_rate"),
+            col("json_payload")
         )
         
-        logger.info(f"Extracted metadata for {event_meta_df.count()} events")
-        return event_meta_df
+        return landing_df, event_meta_df
     
-    def validate_schema(self, event_meta_df):
-        """Perform schema validation and separate rejects"""
-        logger.info("Performing schema validation...")
+    def validate_events(self, event_meta_df):
+        """Validate events and separate valid from rejected records"""
+        logger.info("Validating events...")
         
-        # Schema validation: event_type must be 'MORTGAGE_AMENDMENT' and required fields must not be null
-        valid_events = event_meta_df.filter(
-            (col("event_type") == "MORTGAGE_AMENDMENT") &
-            (col("event_id").isNotNull()) &
-            (col("loan_id").isNotNull())
-        )
+        # Register UDF for business validation
+        business_reject_udf = udf(self.business_reject_reason, StringType())
         
-        # Schema rejects
+        # Schema validation - filter records with missing required fields
         schema_rejects = event_meta_df.filter(
-            (col("event_type") != "MORTGAGE_AMENDMENT") |
-            (col("event_id").isNull()) |
-            (col("loan_id").isNull())
+            (col("event_id").isNull()) | 
+            (col("loan_id").isNull()) | 
+            (col("event_type") != "MORTGAGE_AMENDMENT")
         ).select(
             col("event_id"),
             col("loan_id"),
@@ -257,25 +168,23 @@ class MortgageAmendmentToMISMOXML:
             current_timestamp().alias("timestamp")
         )
         
-        logger.info(f"Schema validation: {valid_events.count()} valid, {schema_rejects.count()} rejects")
-        return valid_events, schema_rejects
-    
-    def validate_business_rules(self, valid_events_df):
-        """Perform business rule validation"""
-        logger.info("Performing business rule validation...")
-        
-        business_reject_udf = self.business_reject_reason_udf()
-        
-        # Add business validation column
-        events_with_validation = valid_events_df.withColumn(
-            "business_reject_reason",
-            business_reject_udf(col("amendment_type"), col("effective_date"), col("new_rate"))
+        # Valid schema records
+        valid_schema_df = event_meta_df.filter(
+            (col("event_id").isNotNull()) & 
+            (col("loan_id").isNotNull()) & 
+            (col("event_type") == "MORTGAGE_AMENDMENT")
         )
         
-        # Separate business valid and reject records
-        business_valid = events_with_validation.filter(col("business_reject_reason").isNull())
+        # Business validation
+        business_validated_df = valid_schema_df.withColumn(
+            "business_reject_reason",
+            business_reject_udf(col("amendment_type"), col("new_rate"), col("effective_date"))
+        )
         
-        business_rejects = events_with_validation.filter(col("business_reject_reason").isNotNull()).select(
+        # Business rejects
+        business_rejects = business_validated_df.filter(
+            col("business_reject_reason").isNotNull()
+        ).select(
             col("event_id"),
             col("loan_id"),
             col("business_reject_reason").alias("reject_reason"),
@@ -283,23 +192,28 @@ class MortgageAmendmentToMISMOXML:
             current_timestamp().alias("timestamp")
         )
         
-        logger.info(f"Business validation: {business_valid.count()} valid, {business_rejects.count()} rejects")
-        return business_valid, business_rejects
+        # Valid records
+        valid_records = business_validated_df.filter(
+            col("business_reject_reason").isNull()
+        ).drop("business_reject_reason")
+        
+        # Combine all rejects
+        all_rejects = schema_rejects.union(business_rejects)
+        
+        return valid_records, all_rejects
     
-    def generate_xml(self, valid_events_df, template_df):
-        """Generate MISMO XML using template join and token replacement"""
-        logger.info("Generating MISMO XML...")
+    def generate_xml(self, valid_records, template_data):
+        """Generate XML using template join"""
+        logger.info("Generating XML...")
         
-        render_xml_udf = self.render_xml_udf()
+        # Create template DataFrame
+        template_df = self.spark.createDataFrame(template_data, self.template_record_schema)
         
-        # Broadcast the template (single record)
-        template_broadcast = broadcast(template_df)
+        # Register XML rendering UDF
+        render_xml_udf = udf(self.render_xml, StringType())
         
-        # Cross join with template (since template is single record)
-        events_with_template = valid_events_df.crossJoin(template_broadcast)
-        
-        # Generate XML using token replacement
-        xml_output = events_with_template.select(
+        # Broadcast cross join with template (since template is single record)
+        xml_output = valid_records.crossJoin(broadcast(template_df)).select(
             col("event_id"),
             col("loan_id"),
             render_xml_udf(
@@ -308,116 +222,89 @@ class MortgageAmendmentToMISMOXML:
                 col("loan_id"),
                 col("amendment_type"),
                 col("effective_date"),
-                col("new_rate"),
-                col("borrower_name"),
-                col("property_address"),
-                col("loan_amount")
+                col("new_rate")
             ).alias("xml_content"),
-            current_timestamp().alias("generated_timestamp")
+            current_timestamp().alias("processed_timestamp")
         )
         
-        logger.info(f"Generated XML for {xml_output.count()} events")
         return xml_output
     
-    def persist_rejects(self, schema_rejects_df, business_rejects_df, output_path="/tmp/rejects"):
-        """Persist all reject records for audit trail"""
-        logger.info(f"Persisting reject records to {output_path}")
-        
-        try:
-            # Union all rejects
-            all_rejects = schema_rejects_df.union(business_rejects_df)
-            
-            all_rejects.write.mode("overwrite").option("path", output_path).saveAsTable("reject_records_table")
-            logger.info(f"Persisted {all_rejects.count()} reject records")
-        except Exception as e:
-            logger.error(f"Error persisting rejects: {e}")
+    def write_to_delta(self, df, table_path, mode="overwrite"):
+        """Write DataFrame to Delta table"""
+        logger.info(f"Writing to Delta table: {table_path}")
+        df.write.format("delta").mode(mode).save(table_path)
     
-    def persist_xml_output(self, xml_output_df, output_path="/tmp/mismo_xml_output"):
-        """Persist generated XML output"""
-        logger.info(f"Persisting XML output to {output_path}")
-        
-        try:
-            xml_output_df.write.mode("overwrite").option("path", output_path).saveAsTable("xml_output_table")
-            logger.info(f"Persisted {xml_output_df.count()} XML records")
-        except Exception as e:
-            logger.error(f"Error persisting XML output: {e}")
+    def read_from_delta(self, table_path):
+        """Read DataFrame from Delta table"""
+        logger.info(f"Reading from Delta table: {table_path}")
+        return self.spark.read.format("delta").load(table_path)
     
     def run_etl_pipeline(self):
-        """Execute the complete ETL pipeline"""
-        logger.info("Starting Mortgage Amendment to MISMO XML ETL pipeline...")
-        
+        """Main ETL pipeline execution"""
         try:
+            logger.info("Starting Mortgage Amendment to MISMO XML ETL Pipeline...")
+            
+            # Create sample data
+            landing_data, template_data = self.create_sample_data()
+            
             # Step 1: Read landing files
-            raw_events_df, template_df = self.read_landing_files()
+            raw_events_df, event_meta_df = self.read_landing_files(landing_data)
             
-            # Step 2: Persist raw events (audit trail)
-            self.persist_raw_events(raw_events_df)
+            # Step 2: Persist raw events (before any filtering)
+            self.write_to_delta(raw_events_df, "/tmp/delta/raw_events")
+            logger.info("Raw events persisted successfully")
             
-            # Step 3: Extract metadata from JSON
-            event_meta_df = self.extract_metadata(raw_events_df)
+            # Step 3: Validate events
+            valid_records, reject_records = self.validate_events(event_meta_df)
             
-            # Step 4: Schema validation
-            valid_events_df, schema_rejects_df = self.validate_schema(event_meta_df)
+            # Step 4: Persist reject records
+            if reject_records.count() > 0:
+                self.write_to_delta(reject_records, "/tmp/delta/reject_records")
+                logger.info(f"Reject records persisted: {reject_records.count()}")
             
-            # Step 5: Business rule validation
-            business_valid_df, business_rejects_df = self.validate_business_rules(valid_events_df)
+            # Step 5: Generate XML for valid records
+            if valid_records.count() > 0:
+                xml_output = self.generate_xml(valid_records, template_data)
+                
+                # Step 6: Persist XML output
+                self.write_to_delta(xml_output, "/tmp/delta/xml_output")
+                logger.info(f"XML output generated and persisted: {xml_output.count()}")
+                
+                # Display sample XML output
+                logger.info("Sample XML Output:")
+                xml_output.select("event_id", "loan_id", "xml_content").show(truncate=False)
             
-            # Step 6: Generate XML
-            xml_output_df = self.generate_xml(business_valid_df, template_df)
+            # Step 7: Data validation - ensure no data loss
+            raw_count = raw_events_df.count()
+            valid_count = valid_records.count() if valid_records.count() > 0 else 0
+            reject_count = reject_records.count() if reject_records.count() > 0 else 0
             
-            # Step 7: Persist rejects and output
-            self.persist_rejects(schema_rejects_df, business_rejects_df)
-            self.persist_xml_output(xml_output_df)
+            logger.info(f"Data Validation - Raw: {raw_count}, Valid: {valid_count}, Rejected: {reject_count}")
+            logger.info(f"Data Loss Check: {raw_count == (valid_count + reject_count)}")
             
-            # Step 8: Data validation - ensure no data loss
-            total_input = raw_events_df.count()
-            total_output = xml_output_df.count()
-            total_rejects = schema_rejects_df.count() + business_rejects_df.count()
-            
-            logger.info(f"Pipeline completed successfully:")
-            logger.info(f"  Input records: {total_input}")
-            logger.info(f"  XML output: {total_output}")
-            logger.info(f"  Total rejects: {total_rejects}")
-            logger.info(f"  Data integrity check: {total_input == (total_output + total_rejects)}")
+            logger.info("ETL Pipeline completed successfully!")
             
             return {
-                'raw_events': raw_events_df,
-                'xml_output': xml_output_df,
-                'schema_rejects': schema_rejects_df,
-                'business_rejects': business_rejects_df,
-                'template': template_df
+                "raw_events": raw_events_df,
+                "valid_records": valid_records,
+                "reject_records": reject_records,
+                "xml_output": xml_output if valid_records.count() > 0 else None
             }
             
         except Exception as e:
-            logger.error(f"ETL pipeline failed: {e}")
-            raise
+            logger.error(f"ETL Pipeline failed: {str(e)}")
+            raise e
 
-def main():
-    """Main execution function"""
-    try:
-        # Initialize and run the ETL job
-        etl_job = MortgageAmendmentToMISMOXML()
-        results = etl_job.run_etl_pipeline()
-        
-        print("\n=== ETL Pipeline Execution Summary ===")
-        print(f"Raw Events Count: {results['raw_events'].count()}")
-        print(f"XML Output Count: {results['xml_output'].count()}")
-        print(f"Schema Rejects Count: {results['schema_rejects'].count()}")
-        print(f"Business Rejects Count: {results['business_rejects'].count()}")
-        
-        # Show sample results
-        print("\n=== Sample XML Output ===")
-        results['xml_output'].select("event_id", "loan_id", "xml_content").show(2, truncate=False)
-        
-        print("\n=== Sample Rejects ===")
-        if results['schema_rejects'].count() > 0:
-            results['schema_rejects'].show(truncate=False)
-        if results['business_rejects'].count() > 0:
-            results['business_rejects'].show(truncate=False)
-            
-    except Exception as e:
-        logger.error(f"Main execution failed: {e}")
-        sys.exit(1)
-
+# Main execution
 if __name__ == "__main__":
-    main()
+    # Initialize and run the ETL pipeline
+    etl_job = MortgageAmendmentToMISMOXML()
+    results = etl_job.run_etl_pipeline()
+    
+    print("\n=== ETL Pipeline Execution Summary ===")
+    print(f"Raw Events Count: {results['raw_events'].count()}")
+    print(f"Valid Records Count: {results['valid_records'].count()}")
+    print(f"Reject Records Count: {results['reject_records'].count()}")
+    if results['xml_output']:
+        print(f"XML Output Count: {results['xml_output'].count()}")
+    print("=== Pipeline Completed Successfully ===")
