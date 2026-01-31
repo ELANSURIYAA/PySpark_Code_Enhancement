@@ -1,690 +1,707 @@
-# _____________________________________________
-# ## *Author*: AAVA
-# ## *Created on*:   
-# ## *Description*: Comprehensive unit tests for RegulatoryReportingETL Enhanced PySpark pipeline
-# ## *Version*: 1 
-# ## *Updated on*: 
-# _____________________________________________
+'''
+_____________________________________________
+## *Author*: AAVA
+## *Created on*:   
+## *Description*: Comprehensive unit tests for G_MtgAmendment_To_MISMO_XML_LLD_Pipeline_1.py - Testing data transformations, edge cases, and error handling scenarios
+## *Version*: 1 
+## *Updated on*: 
+_____________________________________________
+'''
 
 import pytest
-import logging
-from unittest.mock import Mock, patch, MagicMock
-from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.functions import col, count, sum as spark_sum, when, lit, current_date
-from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DecimalType, DateType, LongType, DoubleType
-from pyspark.testing import assertDataFrameEqual
-from delta.tables import DeltaTable
-import tempfile
-import shutil
+import sys
 import os
-from datetime import date
+from unittest.mock import Mock, patch, MagicMock
+from pyspark.sql import SparkSession
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, LongType
+from pyspark.sql.functions import col, lit
+from pyspark.sql import Row
+import logging
 
-# Import the functions from the main module
-# Note: In actual implementation, replace with proper import
-# from regulatory_reporting_etl import (
-#     get_spark_session, create_sample_data, read_delta_table,
-#     create_aml_customer_transactions, create_enhanced_branch_summary_report,
-#     write_to_delta_table, validate_data_quality, main
-# )
+# Import the classes and functions to be tested
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from G_MtgAmendment_To_MISMO_XML_LLD_Pipeline_1 import (
+    Config,
+    SchemaDefinitions,
+    DataTransformationUtils,
+    MortgageAmendmentProcessor
+)
 
-class TestRegulatoryReportingETL:
-    """
-    Comprehensive test suite for Regulatory Reporting ETL pipeline.
-    Tests all functions, edge cases, and error handling scenarios.
-    """
+class TestConfig:
+    """Test cases for Config class"""
     
-    @pytest.fixture(scope="class")
-    def spark_session(self):
-        """
-        Create a Spark session for testing.
-        """
-        spark = SparkSession.builder \
-            .appName("TestRegulatoryReportingETL") \
-            .master("local[*]") \
-            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
-            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
-            .config("spark.sql.warehouse.dir", tempfile.mkdtemp()) \
-            .getOrCreate()
+    def test_config_initialization_default_values(self):
+        """Test Config initialization with default values"""
+        window_ts = "20231201_120000"
+        config = Config(window_ts)
         
-        yield spark
-        spark.stop()
+        assert config.window_ts == window_ts
+        assert config.project_dir == "/apps/mortgage-amendment-mismo"
+        assert config.aws_bucket_url == "/data/landing/mortgage_amendment"
+        assert config.error_log_path == f"/data/out/rejects/rejects_{window_ts}.dat"
+        assert config.product_miss_path == f"/data/out/raw_events/raw_events_{window_ts}.dat"
+        assert config.mismo_out_path == f"/data/out/mismo_xml/mismo_amendment_{window_ts}.xml"
+        assert config.template_record_file == f"/apps/mortgage-amendment-mismo/lookups/mismo_template_record.dat"
+        assert config.landing_file == f"/data/landing/mortgage_amendment/amendment_events_{window_ts}.dat"
     
-    @pytest.fixture
-    def sample_dataframes(self, spark_session):
-        """
-        Create sample DataFrames for testing.
-        """
-        # Customer test data
-        customer_schema = StructType([
-            StructField("CUSTOMER_ID", IntegerType(), True),
-            StructField("NAME", StringType(), True),
-            StructField("EMAIL", StringType(), True),
-            StructField("PHONE", StringType(), True),
-            StructField("ADDRESS", StringType(), True),
-            StructField("CREATED_DATE", DateType(), True)
-        ])
+    def test_config_initialization_custom_values(self):
+        """Test Config initialization with custom values"""
+        window_ts = "20231201_120000"
+        custom_project_dir = "/custom/project"
+        custom_bucket_url = "/custom/bucket"
         
-        customer_data = [
-            (1, "John Doe", "john.doe@email.com", "123-456-7890", "123 Main St", date(2023, 1, 15)),
-            (2, "Jane Smith", "jane.smith@email.com", "098-765-4321", "456 Oak Ave", date(2023, 2, 20)),
-            (3, "Bob Johnson", "bob.johnson@email.com", "555-123-4567", "789 Pine Rd", date(2023, 3, 10))
+        config = Config(window_ts, custom_project_dir, custom_bucket_url)
+        
+        assert config.window_ts == window_ts
+        assert config.project_dir == custom_project_dir
+        assert config.aws_bucket_url == custom_bucket_url
+        assert config.template_record_file == f"{custom_project_dir}/lookups/mismo_template_record.dat"
+        assert config.landing_file == f"{custom_bucket_url}/amendment_events_{window_ts}.dat"
+    
+    def test_config_with_empty_window_ts(self):
+        """Test Config with empty window timestamp"""
+        window_ts = ""
+        config = Config(window_ts)
+        
+        assert config.window_ts == ""
+        assert config.error_log_path == "/data/out/rejects/rejects_.dat"
+        assert config.product_miss_path == "/data/out/raw_events/raw_events_.dat"
+
+class TestSchemaDefinitions:
+    """Test cases for SchemaDefinitions class"""
+    
+    def test_kafka_event_schema(self):
+        """Test Kafka event schema structure"""
+        schema = SchemaDefinitions.get_kafka_event_schema()
+        
+        assert isinstance(schema, StructType)
+        field_names = [field.name for field in schema.fields]
+        expected_fields = ["kafka_key", "kafka_partition", "kafka_offset", "ingest_ts", "payload_json"]
+        
+        assert field_names == expected_fields
+        assert schema.fields[1].dataType == IntegerType()
+        assert schema.fields[2].dataType == LongType()
+    
+    def test_event_meta_schema(self):
+        """Test event metadata schema structure"""
+        schema = SchemaDefinitions.get_event_meta_schema()
+        
+        assert isinstance(schema, StructType)
+        field_names = [field.name for field in schema.fields]
+        expected_fields = [
+            "event_id", "event_type", "event_ts", "loan_id", "source_system",
+            "kafka_key", "kafka_partition", "kafka_offset", "ingest_ts", "payload_json"
         ]
         
-        customer_df = spark_session.createDataFrame(customer_data, customer_schema)
-        
-        # Branch test data
-        branch_schema = StructType([
-            StructField("BRANCH_ID", IntegerType(), True),
-            StructField("BRANCH_NAME", StringType(), True),
-            StructField("BRANCH_CODE", StringType(), True),
-            StructField("CITY", StringType(), True),
-            StructField("STATE", StringType(), True),
-            StructField("COUNTRY", StringType(), True)
-        ])
-        
-        branch_data = [
-            (101, "Downtown Branch", "DT001", "New York", "NY", "USA"),
-            (102, "Uptown Branch", "UT002", "Los Angeles", "CA", "USA"),
-            (103, "Central Branch", "CT003", "Chicago", "IL", "USA")
-        ]
-        
-        branch_df = spark_session.createDataFrame(branch_data, branch_schema)
-        
-        # Account test data
-        account_schema = StructType([
-            StructField("ACCOUNT_ID", IntegerType(), True),
-            StructField("CUSTOMER_ID", IntegerType(), True),
-            StructField("BRANCH_ID", IntegerType(), True),
-            StructField("ACCOUNT_NUMBER", StringType(), True),
-            StructField("ACCOUNT_TYPE", StringType(), True),
-            StructField("BALANCE", DecimalType(15,2), True),
-            StructField("OPENED_DATE", DateType(), True)
-        ])
-        
-        account_data = [
-            (1001, 1, 101, "ACC001001", "SAVINGS", 15000.50, date(2023, 1, 20)),
-            (1002, 2, 102, "ACC002002", "CHECKING", 8500.75, date(2023, 2, 25)),
-            (1003, 3, 103, "ACC003003", "SAVINGS", 22000.00, date(2023, 3, 15)),
-            (1004, 1, 101, "ACC001004", "CHECKING", 5500.25, date(2023, 4, 10))
-        ]
-        
-        account_df = spark_session.createDataFrame(account_data, account_schema)
-        
-        # Transaction test data
-        transaction_schema = StructType([
-            StructField("TRANSACTION_ID", IntegerType(), True),
-            StructField("ACCOUNT_ID", IntegerType(), True),
-            StructField("TRANSACTION_TYPE", StringType(), True),
-            StructField("AMOUNT", DecimalType(15,2), True),
-            StructField("TRANSACTION_DATE", DateType(), True),
-            StructField("DESCRIPTION", StringType(), True)
-        ])
-        
-        transaction_data = [
-            (10001, 1001, "DEPOSIT", 1000.00, date(2023, 5, 1), "Salary deposit"),
-            (10002, 1001, "WITHDRAWAL", 200.00, date(2023, 5, 2), "ATM withdrawal"),
-            (10003, 1002, "DEPOSIT", 1500.00, date(2023, 5, 3), "Check deposit"),
-            (10004, 1003, "TRANSFER", 500.00, date(2023, 5, 4), "Online transfer"),
-            (10005, 1004, "DEPOSIT", 750.00, date(2023, 5, 5), "Cash deposit"),
-            (10006, 1002, "WITHDRAWAL", 100.00, date(2023, 5, 6), "Debit card purchase")
-        ]
-        
-        transaction_df = spark_session.createDataFrame(transaction_data, transaction_schema)
-        
-        # Branch Operational Details test data
-        branch_operational_schema = StructType([
-            StructField("BRANCH_ID", IntegerType(), True),
-            StructField("REGION", StringType(), True),
-            StructField("MANAGER_NAME", StringType(), True),
-            StructField("LAST_AUDIT_DATE", DateType(), True),
-            StructField("IS_ACTIVE", StringType(), True)
-        ])
-        
-        branch_operational_data = [
-            (101, "Northeast", "Alice Johnson", date(2023, 4, 15), "Y"),
-            (102, "West Coast", "Bob Wilson", date(2023, 3, 20), "Y"),
-            (103, "Midwest", "Carol Davis", date(2023, 2, 10), "N")  # Inactive branch
-        ]
-        
-        branch_operational_df = spark_session.createDataFrame(branch_operational_data, branch_operational_schema)
-        
-        return customer_df, account_df, transaction_df, branch_df, branch_operational_df
+        assert field_names == expected_fields
+        assert len(schema.fields) == 10
     
-    def test_get_spark_session_success(self):
-        """
-        Test successful Spark session creation.
-        """
-        with patch('pyspark.sql.SparkSession.getActiveSession') as mock_active:
-            with patch('pyspark.sql.SparkSession.builder') as mock_builder:
-                mock_spark = Mock()
-                mock_spark.conf.set = Mock()
-                mock_active.return_value = mock_spark
-                
-                # Import and test the function
-                # result = get_spark_session("TestApp")
-                
-                # Assertions would go here
-                # assert result == mock_spark
-                # mock_spark.conf.set.assert_called()
-                pass
+    def test_template_record_schema(self):
+        """Test template record schema structure"""
+        schema = SchemaDefinitions.get_template_record_schema()
+        
+        assert isinstance(schema, StructType)
+        field_names = [field.name for field in schema.fields]
+        expected_fields = ["template_key", "template_text"]
+        
+        assert field_names == expected_fields
+        assert len(schema.fields) == 2
     
-    def test_get_spark_session_create_new(self):
-        """
-        Test Spark session creation when no active session exists.
-        """
-        with patch('pyspark.sql.SparkSession.getActiveSession') as mock_active:
-            with patch('pyspark.sql.SparkSession.builder') as mock_builder:
-                mock_active.return_value = None
-                mock_spark = Mock()
-                mock_spark.conf.set = Mock()
-                
-                mock_builder_instance = Mock()
-                mock_builder_instance.appName.return_value = mock_builder_instance
-                mock_builder_instance.config.return_value = mock_builder_instance
-                mock_builder_instance.getOrCreate.return_value = mock_spark
-                mock_builder.return_value = mock_builder_instance
-                
-                # Test would call get_spark_session() here
-                pass
+    def test_reject_record_schema(self):
+        """Test reject record schema structure"""
+        schema = SchemaDefinitions.get_reject_record_schema()
+        
+        assert isinstance(schema, StructType)
+        field_names = [field.name for field in schema.fields]
+        expected_fields = [
+            "reject_type", "reason", "event_id", "loan_id", "event_ts",
+            "source_system", "kafka_partition", "kafka_offset", "ingest_ts", "payload_json"
+        ]
+        
+        assert field_names == expected_fields
+        assert len(schema.fields) == 10
     
-    def test_get_spark_session_exception(self):
-        """
-        Test Spark session creation with exception handling.
-        """
-        with patch('pyspark.sql.SparkSession.getActiveSession') as mock_active:
-            mock_active.side_effect = Exception("Connection failed")
+    def test_xml_out_record_schema(self):
+        """Test XML output record schema structure"""
+        schema = SchemaDefinitions.get_xml_out_record_schema()
+        
+        assert isinstance(schema, StructType)
+        field_names = [field.name for field in schema.fields]
+        expected_fields = ["event_id", "loan_id", "xml_text"]
+        
+        assert field_names == expected_fields
+        assert len(schema.fields) == 3
+
+class TestDataTransformationUtils:
+    """Test cases for DataTransformationUtils class"""
+    
+    def test_setup_logging(self):
+        """Test logging setup"""
+        logger = DataTransformationUtils.setup_logging()
+        
+        assert isinstance(logger, logging.Logger)
+        assert logger.level == logging.INFO
+    
+    @patch('builtins.print')
+    def test_log_dataframe_count(self, mock_print):
+        """Test dataframe count logging"""
+        # Mock dataframe
+        mock_df = Mock()
+        mock_df.count.return_value = 100
+        
+        # Mock logger
+        mock_logger = Mock()
+        
+        count = DataTransformationUtils.log_dataframe_count(mock_df, "test_step", mock_logger)
+        
+        assert count == 100
+        mock_df.count.assert_called_once()
+        mock_logger.info.assert_called_once_with("Row count after test_step: 100")
+    
+    def test_json_find_string_value_valid_json(self):
+        """Test JSON string value extraction with valid JSON"""
+        json_str = '{"event_id": "12345", "loan_id": "LOAN_67890"}'
+        
+        result = DataTransformationUtils.json_find_string_value(json_str, "event_id")
+        assert result == "12345"
+        
+        result = DataTransformationUtils.json_find_string_value(json_str, "loan_id")
+        assert result == "LOAN_67890"
+    
+    def test_json_find_string_value_missing_key(self):
+        """Test JSON string value extraction with missing key"""
+        json_str = '{"event_id": "12345"}'
+        
+        result = DataTransformationUtils.json_find_string_value(json_str, "missing_key")
+        assert result == ""
+    
+    def test_json_find_string_value_null_json(self):
+        """Test JSON string value extraction with null JSON"""
+        result = DataTransformationUtils.json_find_string_value(None, "event_id")
+        assert result == ""
+        
+        result = DataTransformationUtils.json_find_string_value("", "event_id")
+        assert result == ""
+    
+    def test_json_find_scalar_value_valid_json(self):
+        """Test JSON scalar value extraction with valid JSON"""
+        json_str = '{"new_rate": 3.5, "prior_rate": 4.0, "term_months": 360}'
+        
+        result = DataTransformationUtils.json_find_scalar_value(json_str, "new_rate")
+        assert result == "3.5"
+        
+        result = DataTransformationUtils.json_find_scalar_value(json_str, "term_months")
+        assert result == "360"
+    
+    def test_json_find_scalar_value_missing_key(self):
+        """Test JSON scalar value extraction with missing key"""
+        json_str = '{"new_rate": 3.5}'
+        
+        result = DataTransformationUtils.json_find_scalar_value(json_str, "missing_key")
+        assert result == ""
+    
+    def test_json_find_scalar_value_null_json(self):
+        """Test JSON scalar value extraction with null JSON"""
+        result = DataTransformationUtils.json_find_scalar_value(None, "new_rate")
+        assert result == ""
+    
+    def test_create_json_udfs(self):
+        """Test UDF creation"""
+        string_udf, scalar_udf = DataTransformationUtils.create_json_udfs()
+        
+        assert string_udf is not None
+        assert scalar_udf is not None
+    
+    def test_business_reject_reason_missing_effective_date(self):
+        """Test business validation with missing effective date"""
+        result = DataTransformationUtils.business_reject_reason("", "RATE_CHANGE", "3.5")
+        assert result == "Missing effective_date"
+        
+        result = DataTransformationUtils.business_reject_reason(None, "RATE_CHANGE", "3.5")
+        assert result == "Missing effective_date"
+    
+    def test_business_reject_reason_missing_amendment_type(self):
+        """Test business validation with missing amendment type"""
+        result = DataTransformationUtils.business_reject_reason("2023-12-01", "", "3.5")
+        assert result == "Missing amendment_type"
+        
+        result = DataTransformationUtils.business_reject_reason("2023-12-01", None, "3.5")
+        assert result == "Missing amendment_type"
+    
+    def test_business_reject_reason_missing_new_rate_for_rate_change(self):
+        """Test business validation with missing new rate for rate change"""
+        result = DataTransformationUtils.business_reject_reason("2023-12-01", "RATE_CHANGE", "")
+        assert result == "Missing new_rate for RATE_CHANGE"
+        
+        result = DataTransformationUtils.business_reject_reason("2023-12-01", "RATE_CHANGE", None)
+        assert result == "Missing new_rate for RATE_CHANGE"
+    
+    def test_business_reject_reason_valid_data(self):
+        """Test business validation with valid data"""
+        result = DataTransformationUtils.business_reject_reason("2023-12-01", "RATE_CHANGE", "3.5")
+        assert result is None
+        
+        result = DataTransformationUtils.business_reject_reason("2023-12-01", "TERM_CHANGE", "")
+        assert result is None
+    
+    def test_render_xml_complete_template(self):
+        """Test XML rendering with complete template"""
+        template = "<loan id='{{LOAN_ID}}' event='{{EVENT_ID}}' date='{{EFFECTIVE_DATE}}' type='{{AMENDMENT_TYPE}}' rate='{{NEW_RATE}}' term='{{NEW_TERM_MONTHS}}'></loan>"
+        
+        result = DataTransformationUtils.render_xml(
+            template, "LOAN123", "EVT456", "2023-12-01", "RATE_CHANGE", "3.5", "360"
+        )
+        
+        expected = "<loan id='LOAN123' event='EVT456' date='2023-12-01' type='RATE_CHANGE' rate='3.5' term='360'></loan>"
+        assert result == expected
+    
+    def test_render_xml_null_values(self):
+        """Test XML rendering with null values"""
+        template = "<loan id='{{LOAN_ID}}' event='{{EVENT_ID}}'></loan>"
+        
+        result = DataTransformationUtils.render_xml(
+            template, None, None, None, None, None, None
+        )
+        
+        expected = "<loan id='' event=''></loan>"
+        assert result == expected
+    
+    def test_render_xml_null_template(self):
+        """Test XML rendering with null template"""
+        result = DataTransformationUtils.render_xml(
+            None, "LOAN123", "EVT456", "2023-12-01", "RATE_CHANGE", "3.5", "360"
+        )
+        
+        assert result == ""
+
+@pytest.fixture
+def spark_session():
+    """Create Spark session for testing"""
+    spark = SparkSession.builder \
+        .appName("TestMortgageAmendmentProcessor") \
+        .master("local[*]") \
+        .config("spark.sql.warehouse.dir", "/tmp/spark-warehouse") \
+        .getOrCreate()
+    
+    yield spark
+    spark.stop()
+
+@pytest.fixture
+def test_config():
+    """Create test configuration"""
+    return Config("20231201_120000")
+
+@pytest.fixture
+def test_logger():
+    """Create test logger"""
+    return DataTransformationUtils.setup_logging()
+
+@pytest.fixture
+def processor(spark_session, test_config, test_logger):
+    """Create MortgageAmendmentProcessor instance for testing"""
+    return MortgageAmendmentProcessor(test_config, spark_session, test_logger)
+
+class TestMortgageAmendmentProcessor:
+    """Test cases for MortgageAmendmentProcessor class"""
+    
+    def test_processor_initialization(self, processor, test_config, test_logger):
+        """Test processor initialization"""
+        assert processor.config == test_config
+        assert processor.logger == test_logger
+        assert processor.utils is not None
+        assert processor.schemas is not None
+        assert processor.json_find_string_value_udf is not None
+        assert processor.json_find_scalar_value_udf is not None
+        assert processor.business_reject_reason_udf is not None
+        assert processor.render_xml_udf is not None
+    
+    def test_ingest_landing_file(self, processor, spark_session):
+        """Test landing file ingestion"""
+        # Create test data
+        test_data = [
+            ("key1", 0, 100, "2023-12-01T10:00:00Z", '{"event_id": "evt1", "loan_id": "loan1"}'),
+            ("key2", 1, 101, "2023-12-01T10:01:00Z", '{"event_id": "evt2", "loan_id": "loan2"}')
+        ]
+        
+        schema = SchemaDefinitions.get_kafka_event_schema()
+        test_df = spark_session.createDataFrame(test_data, schema)
+        
+        # Mock the file read operation
+        with patch.object(processor.spark.read, 'csv', return_value=test_df):
+            result_df = processor.ingest_landing_file()
             
-            # Test would verify exception is raised
-            # with pytest.raises(Exception):
-            #     get_spark_session()
-            pass
+            assert result_df.count() == 2
+            assert result_df.columns == ["kafka_key", "kafka_partition", "kafka_offset", "ingest_ts", "payload_json"]
     
-    def test_create_sample_data(self, spark_session):
-        """
-        Test sample data creation function.
-        """
-        # This would test the create_sample_data function
-        # customer_df, account_df, transaction_df, branch_df, branch_operational_df = create_sample_data(spark_session)
-        
-        # Assertions
-        # assert customer_df.count() == 3
-        # assert account_df.count() == 4
-        # assert transaction_df.count() == 6
-        # assert branch_df.count() == 3
-        # assert branch_operational_df.count() == 3
-        
-        # Verify schema
-        # expected_customer_columns = ["CUSTOMER_ID", "NAME", "EMAIL", "PHONE", "ADDRESS", "CREATED_DATE"]
-        # assert customer_df.columns == expected_customer_columns
-        pass
-    
-    def test_create_aml_customer_transactions(self, spark_session, sample_dataframes):
-        """
-        Test AML customer transactions creation.
-        """
-        customer_df, account_df, transaction_df, branch_df, branch_operational_df = sample_dataframes
-        
-        # This would test the create_aml_customer_transactions function
-        # result_df = create_aml_customer_transactions(customer_df, account_df, transaction_df)
-        
-        # Assertions
-        # assert result_df.count() == 6  # Should match transaction count
-        # expected_columns = ["CUSTOMER_ID", "NAME", "ACCOUNT_ID", "TRANSACTION_ID", "AMOUNT", "TRANSACTION_TYPE", "TRANSACTION_DATE"]
-        # assert result_df.columns == expected_columns
-        
-        # Test data integrity
-        # customer_ids = result_df.select("CUSTOMER_ID").distinct().collect()
-        # assert len(customer_ids) <= 3  # Should not exceed original customer count
-        pass
-    
-    def test_create_aml_customer_transactions_empty_input(self, spark_session):
-        """
-        Test AML customer transactions with empty input DataFrames.
-        """
-        # Create empty DataFrames with proper schemas
-        customer_schema = StructType([
-            StructField("CUSTOMER_ID", IntegerType(), True),
-            StructField("NAME", StringType(), True)
-        ])
-        empty_customer_df = spark_session.createDataFrame([], customer_schema)
-        
-        account_schema = StructType([
-            StructField("CUSTOMER_ID", IntegerType(), True),
-            StructField("ACCOUNT_ID", IntegerType(), True)
-        ])
-        empty_account_df = spark_session.createDataFrame([], account_schema)
-        
-        transaction_schema = StructType([
-            StructField("ACCOUNT_ID", IntegerType(), True),
-            StructField("TRANSACTION_ID", IntegerType(), True),
-            StructField("AMOUNT", DecimalType(15,2), True)
-        ])
-        empty_transaction_df = spark_session.createDataFrame([], transaction_schema)
-        
-        # Test would call create_aml_customer_transactions with empty DataFrames
-        # result_df = create_aml_customer_transactions(empty_customer_df, empty_account_df, empty_transaction_df)
-        # assert result_df.count() == 0
-        pass
-    
-    def test_create_enhanced_branch_summary_report(self, spark_session, sample_dataframes):
-        """
-        Test enhanced branch summary report creation.
-        """
-        customer_df, account_df, transaction_df, branch_df, branch_operational_df = sample_dataframes
-        
-        # This would test the create_enhanced_branch_summary_report function
-        # result_df = create_enhanced_branch_summary_report(transaction_df, account_df, branch_df, branch_operational_df)
-        
-        # Assertions
-        # assert result_df.count() == 3  # Should match branch count
-        # expected_columns = ["BRANCH_ID", "BRANCH_NAME", "TOTAL_TRANSACTIONS", "TOTAL_AMOUNT", "REGION", "LAST_AUDIT_DATE"]
-        # assert result_df.columns == expected_columns
-        
-        # Test conditional logic for IS_ACTIVE = 'Y'
-        # active_branches = result_df.filter(col("REGION").isNotNull()).collect()
-        # assert len(active_branches) == 2  # Only branches 101 and 102 should have REGION populated
-        
-        # Test inactive branch (103) should have null REGION and LAST_AUDIT_DATE
-        # inactive_branch = result_df.filter(col("BRANCH_ID") == 103).collect()[0]
-        # assert inactive_branch["REGION"] is None
-        # assert inactive_branch["LAST_AUDIT_DATE"] is None
-        pass
-    
-    def test_create_enhanced_branch_summary_report_missing_operational_data(self, spark_session, sample_dataframes):
-        """
-        Test enhanced branch summary report with missing operational data.
-        """
-        customer_df, account_df, transaction_df, branch_df, branch_operational_df = sample_dataframes
-        
-        # Create branch operational data missing some branches
-        limited_operational_schema = StructType([
-            StructField("BRANCH_ID", IntegerType(), True),
-            StructField("REGION", StringType(), True),
-            StructField("MANAGER_NAME", StringType(), True),
-            StructField("LAST_AUDIT_DATE", DateType(), True),
-            StructField("IS_ACTIVE", StringType(), True)
-        ])
-        
-        limited_operational_data = [
-            (101, "Northeast", "Alice Johnson", date(2023, 4, 15), "Y")
-            # Missing data for branches 102 and 103
+    def test_extract_event_metadata(self, processor, spark_session):
+        """Test event metadata extraction"""
+        # Create test data
+        test_data = [
+            ("key1", 0, 100, "2023-12-01T10:00:00Z", 
+             '{"event_id": "evt1", "event_type": "MORTGAGE_AMENDMENT", "event_ts": "2023-12-01T09:00:00Z", "loan_id": "loan1", "source_system": "LOS"}')
         ]
         
-        limited_operational_df = spark_session.createDataFrame(limited_operational_data, limited_operational_schema)
+        schema = SchemaDefinitions.get_kafka_event_schema()
+        landing_df = spark_session.createDataFrame(test_data, schema)
         
-        # Test would call create_enhanced_branch_summary_report with limited operational data
-        # result_df = create_enhanced_branch_summary_report(transaction_df, account_df, branch_df, limited_operational_df)
+        result_df = processor.extract_event_metadata(landing_df)
         
-        # Assertions
-        # assert result_df.count() == 3  # Should still have all branches
-        # branches_with_region = result_df.filter(col("REGION").isNotNull()).count()
-        # assert branches_with_region == 1  # Only branch 101 should have REGION
-        pass
+        assert result_df.count() == 1
+        expected_columns = ["event_id", "event_type", "event_ts", "loan_id", "source_system", 
+                          "kafka_key", "kafka_partition", "kafka_offset", "ingest_ts", "payload_json"]
+        assert result_df.columns == expected_columns
     
-    def test_validate_data_quality_success(self, spark_session, sample_dataframes):
-        """
-        Test successful data quality validation.
-        """
-        customer_df, account_df, transaction_df, branch_df, branch_operational_df = sample_dataframes
+    def test_persist_raw_events(self, processor, spark_session):
+        """Test raw events persistence"""
+        # Create test data
+        test_data = [
+            ("evt1", "MORTGAGE_AMENDMENT", "2023-12-01T09:00:00Z", "loan1", "LOS",
+             "key1", 0, 100, "2023-12-01T10:00:00Z", '{"test": "data"}')
+        ]
         
-        # Test would call validate_data_quality
-        # result = validate_data_quality(customer_df, "CUSTOMER")
-        # assert result is True
+        schema = SchemaDefinitions.get_event_meta_schema()
+        event_meta_df = spark_session.createDataFrame(test_data, schema)
         
-        # Test branch summary validation
-        # branch_summary_df = create_enhanced_branch_summary_report(transaction_df, account_df, branch_df, branch_operational_df)
-        # result = validate_data_quality(branch_summary_df, "BRANCH_SUMMARY_REPORT")
-        # assert result is True
-        pass
+        # Mock the write operation
+        with patch.object(event_meta_df.write, 'csv') as mock_write:
+            processor.persist_raw_events(event_meta_df)
+            mock_write.assert_called_once()
     
-    def test_validate_data_quality_empty_dataframe(self, spark_session):
-        """
-        Test data quality validation with empty DataFrame.
-        """
-        empty_schema = StructType([StructField("ID", IntegerType(), True)])
-        empty_df = spark_session.createDataFrame([], empty_schema)
+    def test_validate_schema_and_split_valid_records(self, processor, spark_session):
+        """Test schema validation with valid records"""
+        # Create test data with valid records
+        test_data = [
+            ("evt1", "MORTGAGE_AMENDMENT", "2023-12-01T09:00:00Z", "loan1", "LOS",
+             "key1", 0, 100, "2023-12-01T10:00:00Z", '{"test": "data"}')
+        ]
         
-        # Test would call validate_data_quality with empty DataFrame
-        # result = validate_data_quality(empty_df, "EMPTY_TABLE")
-        # assert result is False
-        pass
+        schema = SchemaDefinitions.get_event_meta_schema()
+        event_meta_df = spark_session.createDataFrame(test_data, schema)
+        
+        schema_reject_df, valid_event_meta_df = processor.validate_schema_and_split(event_meta_df)
+        
+        assert schema_reject_df.count() == 0
+        assert valid_event_meta_df.count() == 1
     
-    def test_validate_data_quality_null_branch_ids(self, spark_session):
-        """
-        Test data quality validation with null BRANCH_ID values.
-        """
-        # Create DataFrame with null BRANCH_ID
+    def test_validate_schema_and_split_invalid_records(self, processor, spark_session):
+        """Test schema validation with invalid records"""
+        # Create test data with invalid records
+        test_data = [
+            ("", "MORTGAGE_AMENDMENT", "2023-12-01T09:00:00Z", "loan1", "LOS",
+             "key1", 0, 100, "2023-12-01T10:00:00Z", '{"test": "data"}'),  # Missing event_id
+            ("evt2", "INVALID_TYPE", "2023-12-01T09:00:00Z", "loan2", "LOS",
+             "key2", 1, 101, "2023-12-01T10:01:00Z", '{"test": "data"}'),  # Invalid event_type
+            ("evt3", "MORTGAGE_AMENDMENT", "2023-12-01T09:00:00Z", "", "LOS",
+             "key3", 2, 102, "2023-12-01T10:02:00Z", '{"test": "data"}')   # Missing loan_id
+        ]
+        
+        schema = SchemaDefinitions.get_event_meta_schema()
+        event_meta_df = spark_session.createDataFrame(test_data, schema)
+        
+        schema_reject_df, valid_event_meta_df = processor.validate_schema_and_split(event_meta_df)
+        
+        assert schema_reject_df.count() == 3
+        assert valid_event_meta_df.count() == 0
+        
+        # Check reject reasons
+        reject_reasons = [row.reason for row in schema_reject_df.collect()]
+        assert "Missing event_id" in reject_reasons
+        assert "Unexpected event_type" in reject_reasons
+        assert "Missing loan_id" in reject_reasons
+    
+    def test_canonicalize_amendment_data(self, processor, spark_session):
+        """Test amendment data canonicalization"""
+        # Create test data
+        test_data = [
+            ("evt1", "MORTGAGE_AMENDMENT", "2023-12-01T09:00:00Z", "loan1", "LOS",
+             "key1", 0, 100, "2023-12-01T10:00:00Z", 
+             '{"amendment_type": "RATE_CHANGE", "effective_date": "2023-12-01", "prior_rate": 4.0, "new_rate": 3.5, "prior_term_months": 360, "new_term_months": 360}')
+        ]
+        
+        schema = SchemaDefinitions.get_event_meta_schema()
+        valid_event_meta_df = spark_session.createDataFrame(test_data, schema)
+        
+        result_df = processor.canonicalize_amendment_data(valid_event_meta_df)
+        
+        assert result_df.count() == 1
+        expected_columns = ["event_id", "event_type", "event_ts", "loan_id", "source_system",
+                          "kafka_key", "kafka_partition", "kafka_offset", "ingest_ts", "payload_json",
+                          "amendment_type", "effective_date", "prior_rate", "new_rate", 
+                          "prior_term_months", "new_term_months"]
+        assert result_df.columns == expected_columns
+    
+    def test_load_template_data(self, processor, spark_session):
+        """Test template data loading"""
+        # Create test template data
+        test_data = [
+            ("MORTGAGE_AMENDMENT", "<loan id='{{LOAN_ID}}' event='{{EVENT_ID}}'></loan>")
+        ]
+        
+        schema = SchemaDefinitions.get_template_record_schema()
+        test_df = spark_session.createDataFrame(test_data, schema)
+        
+        # Mock the file read operation
+        with patch.object(processor.spark.read, 'csv', return_value=test_df):
+            result_df = processor.load_template_data()
+            
+            assert result_df.count() == 1
+            assert result_df.columns == ["template_key", "template_text"]
+    
+    def test_join_with_template(self, processor, spark_session):
+        """Test joining canonical data with template"""
+        # Create canonical data
+        canonical_data = [
+            ("evt1", "MORTGAGE_AMENDMENT", "2023-12-01T09:00:00Z", "loan1", "LOS",
+             "key1", 0, 100, "2023-12-01T10:00:00Z", '{"test": "data"}',
+             "RATE_CHANGE", "2023-12-01", "4.0", "3.5", "360", "360")
+        ]
+        
+        canonical_schema = StructType([
+            StructField("event_id", StringType(), True),
+            StructField("event_type", StringType(), True),
+            StructField("event_ts", StringType(), True),
+            StructField("loan_id", StringType(), True),
+            StructField("source_system", StringType(), True),
+            StructField("kafka_key", StringType(), True),
+            StructField("kafka_partition", IntegerType(), True),
+            StructField("kafka_offset", LongType(), True),
+            StructField("ingest_ts", StringType(), True),
+            StructField("payload_json", StringType(), True),
+            StructField("amendment_type", StringType(), True),
+            StructField("effective_date", StringType(), True),
+            StructField("prior_rate", StringType(), True),
+            StructField("new_rate", StringType(), True),
+            StructField("prior_term_months", StringType(), True),
+            StructField("new_term_months", StringType(), True)
+        ])
+        
+        canonical_df = spark_session.createDataFrame(canonical_data, canonical_schema)
+        
+        # Create template data
+        template_data = [("MORTGAGE_AMENDMENT", "<loan id='{{LOAN_ID}}'></loan>")]
+        template_schema = SchemaDefinitions.get_template_record_schema()
+        template_df = spark_session.createDataFrame(template_data, template_schema)
+        
+        result_df = processor.join_with_template(canonical_df, template_df)
+        
+        assert result_df.count() == 1
+        assert "template_key" in result_df.columns
+        assert "template_text" in result_df.columns
+    
+    def test_business_validate_and_render_xml_valid_data(self, processor, spark_session):
+        """Test business validation and XML rendering with valid data"""
+        # Create test data with template
+        test_data = [
+            ("evt1", "MORTGAGE_AMENDMENT", "2023-12-01T09:00:00Z", "loan1", "LOS",
+             "key1", 0, 100, "2023-12-01T10:00:00Z", '{"test": "data"}',
+             "RATE_CHANGE", "2023-12-01", "4.0", "3.5", "360", "360",
+             "MORTGAGE_AMENDMENT", "<loan id='{{LOAN_ID}}' event='{{EVENT_ID}}'></loan>")
+        ]
+        
         schema = StructType([
-            StructField("BRANCH_ID", IntegerType(), True),
-            StructField("BRANCH_NAME", StringType(), True)
+            StructField("event_id", StringType(), True),
+            StructField("event_type", StringType(), True),
+            StructField("event_ts", StringType(), True),
+            StructField("loan_id", StringType(), True),
+            StructField("source_system", StringType(), True),
+            StructField("kafka_key", StringType(), True),
+            StructField("kafka_partition", IntegerType(), True),
+            StructField("kafka_offset", LongType(), True),
+            StructField("ingest_ts", StringType(), True),
+            StructField("payload_json", StringType(), True),
+            StructField("amendment_type", StringType(), True),
+            StructField("effective_date", StringType(), True),
+            StructField("prior_rate", StringType(), True),
+            StructField("new_rate", StringType(), True),
+            StructField("prior_term_months", StringType(), True),
+            StructField("new_term_months", StringType(), True),
+            StructField("template_key", StringType(), True),
+            StructField("template_text", StringType(), True)
         ])
         
-        data_with_nulls = [
-            (None, "Branch A"),
-            (102, "Branch B")
+        canonical_with_template_df = spark_session.createDataFrame(test_data, schema)
+        
+        business_reject_df, xml_out_df = processor.business_validate_and_render_xml(canonical_with_template_df)
+        
+        assert business_reject_df.count() == 0
+        assert xml_out_df.count() == 1
+        assert xml_out_df.columns == ["event_id", "loan_id", "xml_text"]
+    
+    def test_business_validate_and_render_xml_invalid_data(self, processor, spark_session):
+        """Test business validation with invalid data"""
+        # Create test data with missing effective_date
+        test_data = [
+            ("evt1", "MORTGAGE_AMENDMENT", "2023-12-01T09:00:00Z", "loan1", "LOS",
+             "key1", 0, 100, "2023-12-01T10:00:00Z", '{"test": "data"}',
+             "RATE_CHANGE", "", "4.0", "3.5", "360", "360",  # Missing effective_date
+             "MORTGAGE_AMENDMENT", "<loan id='{{LOAN_ID}}'></loan>")
         ]
         
-        df_with_nulls = spark_session.createDataFrame(data_with_nulls, schema)
-        
-        # Test would call validate_data_quality
-        # result = validate_data_quality(df_with_nulls, "BRANCH_SUMMARY_REPORT")
-        # assert result is False
-        pass
-    
-    def test_read_delta_table_success(self, spark_session):
-        """
-        Test successful Delta table reading.
-        """
-        with patch('pyspark.sql.DataFrameReader.load') as mock_load:
-            mock_df = Mock(spec=DataFrame)
-            mock_load.return_value = mock_df
-            
-            with patch.object(spark_session, 'read') as mock_read:
-                mock_reader = Mock()
-                mock_reader.format.return_value = mock_reader
-                mock_reader.load.return_value = mock_df
-                mock_read.return_value = mock_reader
-                
-                # Test would call read_delta_table
-                # result = read_delta_table(spark_session, "/path/to/delta/table")
-                # assert result == mock_df
-                pass
-    
-    def test_read_delta_table_exception(self, spark_session):
-        """
-        Test Delta table reading with exception.
-        """
-        with patch.object(spark_session, 'read') as mock_read:
-            mock_reader = Mock()
-            mock_reader.format.return_value = mock_reader
-            mock_reader.load.side_effect = Exception("Table not found")
-            mock_read.return_value = mock_reader
-            
-            # Test would verify exception is raised
-            # with pytest.raises(Exception):
-            #     read_delta_table(spark_session, "/invalid/path")
-            pass
-    
-    def test_write_to_delta_table_success(self, spark_session, sample_dataframes):
-        """
-        Test successful Delta table writing.
-        """
-        customer_df, _, _, _, _ = sample_dataframes
-        
-        with patch.object(customer_df, 'write') as mock_write:
-            mock_writer = Mock()
-            mock_writer.format.return_value = mock_writer
-            mock_writer.mode.return_value = mock_writer
-            mock_writer.option.return_value = mock_writer
-            mock_writer.save.return_value = None
-            mock_write.return_value = mock_writer
-            
-            # Test would call write_to_delta_table
-            # write_to_delta_table(customer_df, "/path/to/delta/table", "overwrite")
-            
-            # Verify method calls
-            # mock_writer.format.assert_called_with("delta")
-            # mock_writer.mode.assert_called_with("overwrite")
-            # mock_writer.option.assert_called_with("mergeSchema", "true")
-            # mock_writer.save.assert_called_with("/path/to/delta/table")
-            pass
-    
-    def test_write_to_delta_table_exception(self, spark_session, sample_dataframes):
-        """
-        Test Delta table writing with exception.
-        """
-        customer_df, _, _, _, _ = sample_dataframes
-        
-        with patch.object(customer_df, 'write') as mock_write:
-            mock_writer = Mock()
-            mock_writer.format.return_value = mock_writer
-            mock_writer.mode.return_value = mock_writer
-            mock_writer.option.return_value = mock_writer
-            mock_writer.save.side_effect = Exception("Write failed")
-            mock_write.return_value = mock_writer
-            
-            # Test would verify exception is raised
-            # with pytest.raises(Exception):
-            #     write_to_delta_table(customer_df, "/invalid/path")
-            pass
-    
-    def test_main_function_success(self, spark_session):
-        """
-        Test successful execution of main function.
-        """
-        with patch('__main__.get_spark_session') as mock_get_spark:
-            with patch('__main__.create_sample_data') as mock_create_data:
-                with patch('__main__.create_aml_customer_transactions') as mock_aml:
-                    with patch('__main__.create_enhanced_branch_summary_report') as mock_branch:
-                        with patch('__main__.validate_data_quality') as mock_validate:
-                            
-                            mock_get_spark.return_value = spark_session
-                            mock_create_data.return_value = (Mock(), Mock(), Mock(), Mock(), Mock())
-                            mock_aml.return_value = Mock()
-                            mock_branch.return_value = Mock()
-                            mock_validate.return_value = True
-                            
-                            # Test would call main()
-                            # result = main()
-                            
-                            # Verify function calls
-                            # mock_get_spark.assert_called_once()
-                            # mock_create_data.assert_called_once()
-                            # mock_validate.assert_called()
-                            pass
-    
-    def test_main_function_exception(self, spark_session):
-        """
-        Test main function with exception handling.
-        """
-        with patch('__main__.get_spark_session') as mock_get_spark:
-            mock_get_spark.side_effect = Exception("Spark initialization failed")
-            
-            # Test would verify exception is raised
-            # with pytest.raises(Exception):
-            #     main()
-            pass
-    
-    def test_data_type_conversions(self, spark_session, sample_dataframes):
-        """
-        Test data type conversions in enhanced branch summary report.
-        """
-        customer_df, account_df, transaction_df, branch_df, branch_operational_df = sample_dataframes
-        
-        # Test would call create_enhanced_branch_summary_report
-        # result_df = create_enhanced_branch_summary_report(transaction_df, account_df, branch_df, branch_operational_df)
-        
-        # Verify data types
-        # schema_dict = {field.name: field.dataType for field in result_df.schema.fields}
-        # assert isinstance(schema_dict["BRANCH_ID"], LongType)
-        # assert isinstance(schema_dict["TOTAL_AMOUNT"], DoubleType)
-        # assert isinstance(schema_dict["LAST_AUDIT_DATE"], StringType)
-        pass
-    
-    def test_edge_case_large_amounts(self, spark_session):
-        """
-        Test handling of large transaction amounts.
-        """
-        # Create test data with large amounts
-        transaction_schema = StructType([
-            StructField("TRANSACTION_ID", IntegerType(), True),
-            StructField("ACCOUNT_ID", IntegerType(), True),
-            StructField("TRANSACTION_TYPE", StringType(), True),
-            StructField("AMOUNT", DecimalType(15,2), True),
-            StructField("TRANSACTION_DATE", DateType(), True),
-            StructField("DESCRIPTION", StringType(), True)
+        schema = StructType([
+            StructField("event_id", StringType(), True),
+            StructField("event_type", StringType(), True),
+            StructField("event_ts", StringType(), True),
+            StructField("loan_id", StringType(), True),
+            StructField("source_system", StringType(), True),
+            StructField("kafka_key", StringType(), True),
+            StructField("kafka_partition", IntegerType(), True),
+            StructField("kafka_offset", LongType(), True),
+            StructField("ingest_ts", StringType(), True),
+            StructField("payload_json", StringType(), True),
+            StructField("amendment_type", StringType(), True),
+            StructField("effective_date", StringType(), True),
+            StructField("prior_rate", StringType(), True),
+            StructField("new_rate", StringType(), True),
+            StructField("prior_term_months", StringType(), True),
+            StructField("new_term_months", StringType(), True),
+            StructField("template_key", StringType(), True),
+            StructField("template_text", StringType(), True)
         ])
         
-        large_amount_data = [
-            (20001, 1001, "DEPOSIT", 999999999.99, date(2023, 5, 1), "Large deposit"),
-            (20002, 1001, "WITHDRAWAL", 0.01, date(2023, 5, 2), "Small withdrawal")
+        canonical_with_template_df = spark_session.createDataFrame(test_data, schema)
+        
+        business_reject_df, xml_out_df = processor.business_validate_and_render_xml(canonical_with_template_df)
+        
+        assert business_reject_df.count() == 1
+        assert xml_out_df.count() == 0
+        
+        # Check reject reason
+        reject_row = business_reject_df.collect()[0]
+        assert reject_row.reject_type == "BUSINESS"
+        assert reject_row.reason == "Missing effective_date"
+    
+    def test_write_outputs(self, processor, spark_session):
+        """Test output writing"""
+        # Create test reject data
+        schema_reject_data = [
+            ("SCHEMA", "Missing event_id", "", "loan1", "2023-12-01T09:00:00Z", "LOS", 0, 100, "2023-12-01T10:00:00Z", '{"test": "data"}')
         ]
         
-        large_amount_df = spark_session.createDataFrame(large_amount_data, transaction_schema)
-        
-        # Test would verify handling of edge case amounts
-        # This would be used in create_enhanced_branch_summary_report
-        pass
-    
-    def test_edge_case_special_characters(self, spark_session):
-        """
-        Test handling of special characters in string fields.
-        """
-        # Create test data with special characters
-        customer_schema = StructType([
-            StructField("CUSTOMER_ID", IntegerType(), True),
-            StructField("NAME", StringType(), True),
-            StructField("EMAIL", StringType(), True)
-        ])
-        
-        special_char_data = [
-            (1, "José María", "jose.maria@email.com"),
-            (2, "O'Connor", "oconnor@email.com"),
-            (3, "Smith & Jones", "smith.jones@email.com")
+        business_reject_data = [
+            ("BUSINESS", "Missing effective_date", "evt1", "loan1", "2023-12-01T09:00:00Z", "LOS", 0, 100, "2023-12-01T10:00:00Z", "")
         ]
         
-        special_char_df = spark_session.createDataFrame(special_char_data, customer_schema)
-        
-        # Test would verify proper handling of special characters
-        pass
-    
-    def test_performance_large_dataset(self, spark_session):
-        """
-        Test performance with larger datasets.
-        """
-        # Create larger test datasets
-        import random
-        from datetime import datetime, timedelta
-        
-        # Generate 1000 customers
-        customer_data = [
-            (i, f"Customer_{i}", f"customer_{i}@email.com", f"555-{i:04d}", f"{i} Main St", date(2023, 1, 1))
-            for i in range(1, 1001)
+        xml_out_data = [
+            ("evt1", "loan1", "<loan id='loan1' event='evt1'></loan>")
         ]
         
-        customer_schema = StructType([
-            StructField("CUSTOMER_ID", IntegerType(), True),
-            StructField("NAME", StringType(), True),
-            StructField("EMAIL", StringType(), True),
-            StructField("PHONE", StringType(), True),
-            StructField("ADDRESS", StringType(), True),
-            StructField("CREATED_DATE", DateType(), True)
-        ])
+        reject_schema = SchemaDefinitions.get_reject_record_schema()
+        xml_schema = SchemaDefinitions.get_xml_out_record_schema()
         
-        large_customer_df = spark_session.createDataFrame(customer_data, customer_schema)
+        schema_reject_df = spark_session.createDataFrame(schema_reject_data, reject_schema)
+        business_reject_df = spark_session.createDataFrame(business_reject_data, reject_schema)
+        xml_out_df = spark_session.createDataFrame(xml_out_data, xml_schema)
         
-        # Test would measure performance metrics
-        # start_time = time.time()
-        # result = create_aml_customer_transactions(large_customer_df, account_df, transaction_df)
-        # end_time = time.time()
-        # assert (end_time - start_time) < 30  # Should complete within 30 seconds
-        pass
-    
-    def test_logging_functionality(self, caplog):
-        """
-        Test logging functionality across all functions.
-        """
-        with caplog.at_level(logging.INFO):
-            # Test would call various functions and verify log messages
-            # get_spark_session()
-            # assert "Spark session created successfully" in caplog.text
+        # Mock the write operations
+        with patch.object(schema_reject_df.union(business_reject_df).write, 'csv') as mock_reject_write, \
+             patch.object(xml_out_df.write, 'csv') as mock_xml_write:
             
-            # create_sample_data(spark_session)
-            # assert "Creating sample data for testing" in caplog.text
-            pass
-    
-    def teardown_method(self, method):
-        """
-        Clean up after each test method.
-        """
-        # Clean up any temporary files or resources
-        pass
-    
-    @classmethod
-    def teardown_class(cls):
-        """
-        Clean up after all tests in the class.
-        """
-        # Clean up any class-level resources
-        pass
+            processor.write_outputs(schema_reject_df, business_reject_df, xml_out_df)
+            
+            mock_reject_write.assert_called_once()
+            mock_xml_write.assert_called_once()
 
-# Integration Tests
-class TestRegulatoryReportingETLIntegration:
-    """
-    Integration tests for the complete ETL pipeline.
-    """
+class TestEdgeCases:
+    """Test edge cases and error scenarios"""
     
-    @pytest.fixture(scope="class")
-    def spark_session(self):
-        """
-        Create a Spark session for integration testing.
-        """
-        spark = SparkSession.builder \
-            .appName("TestRegulatoryReportingETLIntegration") \
-            .master("local[*]") \
-            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
-            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
-            .config("spark.sql.warehouse.dir", tempfile.mkdtemp()) \
-            .getOrCreate()
+    def test_empty_dataframe_processing(self, processor, spark_session):
+        """Test processing with empty dataframes"""
+        # Create empty dataframe
+        schema = SchemaDefinitions.get_kafka_event_schema()
+        empty_df = spark_session.createDataFrame([], schema)
         
-        yield spark
-        spark.stop()
+        result_df = processor.extract_event_metadata(empty_df)
+        assert result_df.count() == 0
     
-    def test_end_to_end_pipeline(self, spark_session):
-        """
-        Test the complete end-to-end pipeline execution.
-        """
-        # This would test the entire main() function execution
-        # with real data flow from start to finish
-        pass
-    
-    def test_pipeline_with_delta_tables(self, spark_session):
-        """
-        Test pipeline integration with actual Delta tables.
-        """
-        # Create temporary Delta table locations
-        temp_dir = tempfile.mkdtemp()
+    def test_malformed_json_handling(self, spark_session):
+        """Test handling of malformed JSON"""
+        malformed_json = '{"event_id": "evt1", "incomplete"'
         
-        try:
-            # Test would create actual Delta tables and test read/write operations
-            pass
-        finally:
-            # Clean up temporary directory
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        result = DataTransformationUtils.json_find_string_value(malformed_json, "event_id")
+        assert result == "evt1"  # Should still extract valid parts
+        
+        result = DataTransformationUtils.json_find_string_value(malformed_json, "incomplete")
+        assert result == ""  # Should return empty for incomplete fields
     
-    def test_pipeline_error_recovery(self, spark_session):
-        """
-        Test pipeline behavior under error conditions.
-        """
-        # Test various error scenarios and recovery mechanisms
-        pass
+    def test_special_characters_in_json(self, spark_session):
+        """Test handling of special characters in JSON"""
+        json_with_special_chars = '{"loan_id": "LOAN-123_ABC", "event_id": "EVT@456#789"}'
+        
+        result = DataTransformationUtils.json_find_string_value(json_with_special_chars, "loan_id")
+        assert result == "LOAN-123_ABC"
+        
+        result = DataTransformationUtils.json_find_string_value(json_with_special_chars, "event_id")
+        assert result == "EVT@456#789"
+    
+    def test_xml_template_with_special_characters(self):
+        """Test XML rendering with special characters"""
+        template = "<loan id='{{LOAN_ID}}' note='Special chars: &lt;&gt;&amp;'></loan>"
+        
+        result = DataTransformationUtils.render_xml(
+            template, "LOAN&123", "EVT<456>", "2023-12-01", "RATE_CHANGE", "3.5", "360"
+        )
+        
+        expected = "<loan id='LOAN&123' note='Special chars: &lt;&gt;&amp;'></loan>"
+        assert result == expected
 
-# Performance Tests
-class TestRegulatoryReportingETLPerformance:
-    """
-    Performance tests for the ETL pipeline.
-    """
+class TestPerformanceScenarios:
+    """Test performance-related scenarios"""
     
-    def test_memory_usage(self, spark_session):
-        """
-        Test memory usage patterns.
-        """
-        # Monitor memory usage during pipeline execution
-        pass
+    def test_large_dataset_schema_validation(self, processor, spark_session):
+        """Test schema validation with larger dataset"""
+        # Create larger test dataset
+        test_data = []
+        for i in range(1000):
+            test_data.append((
+                f"evt{i}", "MORTGAGE_AMENDMENT", "2023-12-01T09:00:00Z", f"loan{i}", "LOS",
+                f"key{i}", i % 10, 100 + i, "2023-12-01T10:00:00Z", f'{{"test": "data{i}"}}'
+            ))
+        
+        schema = SchemaDefinitions.get_event_meta_schema()
+        event_meta_df = spark_session.createDataFrame(test_data, schema)
+        
+        schema_reject_df, valid_event_meta_df = processor.validate_schema_and_split(event_meta_df)
+        
+        assert schema_reject_df.count() == 0
+        assert valid_event_meta_df.count() == 1000
     
-    def test_execution_time(self, spark_session):
-        """
-        Test execution time benchmarks.
-        """
-        # Measure execution times for different data volumes
-        pass
-    
-    def test_scalability(self, spark_session):
-        """
-        Test scalability with increasing data volumes.
-        """
-        # Test performance with 10x, 100x, 1000x data volumes
-        pass
+    def test_broadcast_join_with_template(self, processor, spark_session):
+        """Test broadcast join functionality with template data"""
+        # Create canonical data
+        canonical_data = [(f"evt{i}", "MORTGAGE_AMENDMENT", "2023-12-01T09:00:00Z", f"loan{i}", "LOS",
+                          f"key{i}", i % 10, 100 + i, "2023-12-01T10:00:00Z", f'{{"test": "data{i}"}}',
+                          "RATE_CHANGE", "2023-12-01", "4.0", "3.5", "360", "360") for i in range(100)]
+        
+        canonical_schema = StructType([
+            StructField("event_id", StringType(), True),
+            StructField("event_type", StringType(), True),
+            StructField("event_ts", StringType(), True),
+            StructField("loan_id", StringType(), True),
+            StructField("source_system", StringType(), True),
+            StructField("kafka_key", StringType(), True),
+            StructField("kafka_partition", IntegerType(), True),
+            StructField("kafka_offset", LongType(), True),
+            StructField("ingest_ts", StringType(), True),
+            StructField("payload_json", StringType(), True),
+            StructField("amendment_type", StringType(), True),
+            StructField("effective_date", StringType(), True),
+            StructField("prior_rate", StringType(), True),
+            StructField("new_rate", StringType(), True),
+            StructField("prior_term_months", StringType(), True),
+            StructField("new_term_months", StringType(), True)
+        ])
+        
+        canonical_df = spark_session.createDataFrame(canonical_data, canonical_schema)
+        
+        # Create small template data (suitable for broadcast)
+        template_data = [("MORTGAGE_AMENDMENT", "<loan id='{{LOAN_ID}}'></loan>")]
+        template_schema = SchemaDefinitions.get_template_record_schema()
+        template_df = spark_session.createDataFrame(template_data, template_schema)
+        
+        result_df = processor.join_with_template(canonical_df, template_df)
+        
+        assert result_df.count() == 100
+        assert "template_text" in result_df.columns
 
 if __name__ == "__main__":
     # Run tests with pytest
