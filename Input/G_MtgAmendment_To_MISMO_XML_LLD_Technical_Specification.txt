@@ -1,78 +1,66 @@
 -=============================================
 - Author: AAVA
 - Date: 
-- Description: Refactor PySpark job for improved readability, reusability, and data validation
+- Description: Refactor PySpark job for improved readability and data validation
 -=============================================
 
-# Technical Specification for Refactor PySpark job for improved readability, reusability, and data validation
+# Technical Specification for Refactor PySpark job for improved readability and data validation
 
 ## 1. Introduction
-* **Objective:**  
-  Refactor the existing PySpark job to improve code maintainability, readability, and debuggability. The output behavior and business logic must remain unchanged.
-* **Scope:**  
-  The scope includes parameterizing all hard-coded values, consolidating transformation logic, introducing validation checkpoints, and improving code structure. No changes to business rules, data model, or output schema.
+* Objective: Refactor the existing PySpark job to improve configuration management, readability, and debuggability, without changing business logic or output.
+* Scope: Parameterize all hard-coded values (paths, constants), add row-count validation and logging after key transformation steps, and ensure no changes to business logic or output.
 
 ## 2. Code Changes Required
-
-* **Impacted Modules:**  
-  - Main PySpark job script
-  - Any utility/helper modules used for transformations
-
-* **Logic Implementation:**  
-  - **Parameterization:**  
-    - Replace all hard-coded file paths, constants, and environment-specific values with configurable parameters (e.g., via function arguments or config files).
-  - **Reusable Functions:**  
-    - Identify repeated transformation logic (e.g., column renaming, filtering, type casting) and refactor into helper functions with descriptive names.
-      - Example:
-        ```python
-        def clean_column_names(df):
-            # transformation logic
-            return df
-        ```
-  - **Row-Count Validation:**  
-    - After each major transformation or filtering step, log the row count using `df.count()` and appropriate logging statements.
-      - Example:
-        ```python
-        logger.info(f"Row count after filtering: {df.count()}")
-        ```
-  - **Consolidated Column Transformations:**  
-    - Use `selectExpr` to group multiple column operations into a single, readable statement.
-      - Example:
-        ```python
-        df = df.selectExpr("col1 as new_col1", "col2 * 100 as col2_scaled")
-        ```
-  - **Maintain Output Behavior:**  
-    - Ensure that the final output schema and business logic are unchanged.
-  - **Execution:**  
-    - The refactored job must execute successfully end-to-end with no performance regression.
+* Impacted Modules:
+    - Main PySpark job script responsible for ETL processing.
+    - Configuration management (where input/output paths and constants are set).
+    - Logging mechanism for row counts.
+* Logic Implementation:
+    1. Identify all hard-coded file paths, constants, and environment-specific values in the PySpark job.
+    2. Replace hard-coded values with parameterized variables (e.g., via config file, command-line args, or environment variables).
+    3. After each major filtering or transformation step, insert logic to:
+        - Calculate row count (e.g., `df.count()`)
+        - Log row count with a descriptive message (e.g., using `logger.info`)
+    4. Ensure the refactored job produces identical output to the original.
+    5. Validate job execution for successful end-to-end run with no performance regression.
 
 ## 3. Data Model Updates
-
-* **New/Modified Objects:**  
-  - None. No schema or data model changes are required as per the JIRA story.
-
-* **Schema Definition:**  
-  - _No changes. Existing input/output schemas remain as-is._
+* New/Modified Objects:
+    - None. No schema or data model changes per scope.
+* Schema Definition:
+    - N/A (No changes required)
 
 ## 4. Source-to-Target Mapping
-
-| Source Field | Target Field | Transformation Rule |
-|--------------|-------------|--------------------|
-| (No changes) | (No changes)| (No changes)       |
-
-_The mapping remains unchanged as the story is strictly a refactor with no business logic or schema modifications._
+| Source Field              | Target Field              | Transformation Rule                  |
+|--------------------------|--------------------------|--------------------------------------|
+| Hard-coded input path     | Parameterized input path | Use config/parameter instead of code |
+| Hard-coded output path    | Parameterized output path| Use config/parameter instead of code |
+| Hard-coded constants      | Parameterized constants  | Use config/parameter instead of code |
+| DataFrame (pre-transform)| DataFrame (post-transform)| Log row count before/after step      |
 
 ## 5. Assumptions and Constraints
-
-* No new columns, tables, or schema changes are introduced.
-* All refactoring must preserve existing business logic and output.
-* Performance must not degrade as a result of refactoring.
-* All configuration parameters must be documented and default values provided where appropriate.
-* Logging should use the standard logging framework already present in the codebase.
-* Helper functions should be placed in a dedicated utilities module if not already present.
+* Assumptions:
+    - All hard-coded values are easily identifiable in the current PySpark job.
+    - Logging framework (e.g., Python `logging` or Spark log4j) is available and can be used for row count logging.
+    - No changes to business logic, schema, or output format are required.
+    - Parameterization can be achieved via config file, environment variables, or command-line arguments.
+* Constraints:
+    - No refactoring into helper functions.
+    - No consolidation of column logic.
+    - No caching or performance tuning.
+    - No additional audit or reject outputs.
 
 ## 6. References
-
-* JIRA ID: Refactor PySpark job for improved readability, reusability, and data validation
+* JIRA ID: PCE-4
 
 ---
+
+### Cost Estimation
+
+| Task                                   | Effort (Person-Days) |
+|---------------------------------------- |----------------------|
+| Identify and parameterize hard-coded values | 0.5                  |
+| Implement row-count logging                | 0.5                  |
+| Testing and validation                     | 0.5                  |
+| Peer review and documentation              | 0.25                 |
+| **Total Estimated Effort**                 | **1.75 Person-Days** |
